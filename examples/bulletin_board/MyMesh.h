@@ -22,6 +22,9 @@
 #include <RTClib.h>
 #include <target.h>
 
+// Forward declaration
+class SystemMessageQueue;
+
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef FIRMWARE_BUILD_DATE
@@ -77,6 +80,7 @@
 #define FIRMWARE_ROLE "room_server"
 
 #define PACKET_LOG_FILE  "/packet_log"
+#define POSTS_FILE       "/posts"
 
 #define MAX_POST_TEXT_LEN    (160-9)
 
@@ -86,6 +90,21 @@ struct PostInfo {
   char text[MAX_POST_TEXT_LEN+1];
 };
 
+// Network time synchronisation configuration (persistent)
+struct ClockNetSyncConfig {
+  uint8_t enabled;           // 0=off, 1=on (default: 0)
+  uint16_t maxwait_mins;     // Max agreement window in minutes (default: 15, range: 5-60)
+  uint32_t guard;            // 0xDEADBEEF validation marker
+};
+
+// Repeater advertisement buffer entry (runtime only)
+struct RepeaterAdvert {
+  uint8_t pub_key[4];        // First 4 bytes of repeater's public key for identification
+  uint32_t timestamp;        // Unix timestamp from repeater's advert
+  uint32_t received_time;    // Our clock time when advert was received (for aging)
+};
+
+// Bulletin board room server - manages posts, client sync, and flash persistence
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
   unsigned long next_local_advert, next_flood_advert;
@@ -107,15 +126,36 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_sf;
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
+  uint32_t current_boot_sequence;
+  SystemMessageQueue* system_msgs;
+  bool clock_synced_once;  // Track if clock has been synced this boot
+  int16_t pending_system_msg_idx[MAX_CLIENTS];  // System message index awaiting ACK per client (-1 = none)
+  uint8_t system_msg_prelogin_attempts[MAX_CLIENTS][8];  // Pre-login delivery attempts per client per message (max 8 system messages)
+
+  // Network time synchronisation state
+  ClockNetSyncConfig netsync_config;  // Persistent configuration
+  RepeaterAdvert repeater_buffer[3];  // Buffer for up to 3 repeater adverts
+  uint8_t repeater_count;             // Number of valid adverts in buffer
+  bool check_netsync_flag;            // Flag to trigger sync check on next loop
 
   void addPost(ClientInfo* client, const char* postData);
-  void addBulletin(const char* bulletinText);  // Server-generated bulletin (serial only)
   void pushPostToClient(ClientInfo* client, PostInfo& post);
   uint8_t getUnsyncedCount(ClientInfo* client);
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
   File openAppend(const char* fname);
+  File openFileForWrite(const char* filename);  // Platform-specific file open for writing
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
+  void savePosts();
+  void loadPosts();
+  uint32_t loadBootCounter(FILESYSTEM* fs);
+  void saveBootCounter(FILESYSTEM* fs, uint32_t count);
+  void notifyClockSynced(const uint8_t* admin_pubkey);
+  void addSystemMessage(const char* message);  // Centralised system message creator with boot number
+  void loadNetSyncConfig();
+  void saveNetSyncConfig();
+  void checkNetworkTimeSync();
+  void notifyClockSyncedFromRepeaters();
 
 protected:
   float getAirtimeBudgetFactor() const override {
@@ -149,6 +189,7 @@ protected:
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override;
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onAckRecv(mesh::Packet* packet, uint32_t ack_crc) override;
+  void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
 
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
@@ -162,6 +203,8 @@ public:
   NodePrefs* getNodePrefs() {
     return &_prefs;
   }
+  ClientACL* getACL() { return &acl; }
+  uint16_t getNumPosted() const { return _num_posted; }
 
   void savePrefs() override {
     _cli.savePrefs(_fs);
@@ -193,5 +236,11 @@ public:
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
+  void addBulletin(const char* bulletinText);  // Server-generated bulletin (serial/UI)
+  void notifyUIOfLoadedPosts();  // Push loaded posts to UI after boot
+  int getRecentPosts(const PostInfo** dest, int max_posts) const;  // Get latest N posts for display
+  bool isDesynced() const;  // Check if RTC clock is desynced (year < 2025)
   void loop();
 };
+
+extern MyMesh the_mesh;

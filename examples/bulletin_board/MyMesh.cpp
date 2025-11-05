@@ -1,4 +1,10 @@
 #include "MyMesh.h"
+#include "SystemMessageQueue.h"
+
+#ifdef DISPLAY_CLASS
+#include "UITask.h"
+extern UITask ui_task;
+#endif
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -11,6 +17,8 @@
 #define POST_SYNC_DELAY_SECS        6
 
 #define FIRMWARE_VER_LEVEL       1
+
+#define MIN_VALID_TIMESTAMP 1735689600  // Jan 1, 2025 00:00:00 UTC
 
 #define REQ_TYPE_GET_STATUS         0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE         0x02
@@ -48,6 +56,9 @@ void MyMesh::addPost(ClientInfo *client, const char *postData) {
 
   next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   _num_posted++; // stats
+
+  // Save posts to flash
+  savePosts();
 }
 
 void MyMesh::addBulletin(const char* bulletinText) {
@@ -55,15 +66,18 @@ void MyMesh::addBulletin(const char* bulletinText) {
   if (strlen(bulletinText) > MAX_POST_TEXT_LEN) {
     return; // Abort - don't post anything
   }
-  
+
   posts[next_post_idx].author = self_id;  // Use server's identity
   StrHelper::strncpy(posts[next_post_idx].text, bulletinText, MAX_POST_TEXT_LEN);
-  
+
   posts[next_post_idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
   next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
-  
+
   next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   _num_posted++; // stats
+
+  // Save posts to flash
+  savePosts();
 }
 
 void MyMesh::pushPostToClient(ClientInfo *client, PostInfo &post) {
@@ -122,6 +136,28 @@ bool MyMesh::processAck(const uint8_t *data) {
       client->extra.room.pending_ack = 0; // clear this, so next push can happen
       client->extra.room.push_failures = 0;
       client->extra.room.sync_since = client->extra.room.push_post_timestamp; // advance Client's SINCE timestamp, to sync next post
+
+      // If this was a system message, mark it as delivered now that ACK received
+      if (pending_system_msg_idx[i] >= 0) {
+        int msg_idx = pending_system_msg_idx[i];
+        system_msgs->markPushed(msg_idx, client);
+        system_msgs->save(_fs);
+        MESH_DEBUG_PRINTLN("System message %d ACKed by admin %02X, marked delivered", msg_idx, (uint32_t)client->id.pub_key[0]);
+
+        // Always-on Serial output for production monitoring
+        Serial.printf("SystemMessageQueue: Message %d delivered to admin [%02X%02X%02X%02X]\n",
+                      msg_idx,
+                      (uint32_t)client->id.pub_key[0],
+                      (uint32_t)client->id.pub_key[1],
+                      (uint32_t)client->id.pub_key[2],
+                      (uint32_t)client->id.pub_key[3]);
+
+        // Reset pre-login attempts for this message since it was successfully delivered
+        system_msg_prelogin_attempts[i][msg_idx] = 0;
+
+        pending_system_msg_idx[i] = -1;  // Clear pending
+      }
+
       return true;
     }
   }
@@ -146,6 +182,17 @@ File MyMesh::openAppend(const char *fname) {
   return _fs->open(fname, "a");
 #else
   return _fs->open(fname, "a", true);
+#endif
+}
+
+File MyMesh::openFileForWrite(const char *filename) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(filename);  // Delete before write on NRF52/STM32
+  return _fs->open(filename, FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  return _fs->open(filename, "w");
+#else
+  return _fs->open(filename, "w", true);
 #endif
 }
 
@@ -329,6 +376,26 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
         }
       }
 
+      // Clock synchronisation from admin login
+      MESH_DEBUG_PRINTLN("Login: perm=%d, isDesynced=%d, clock_synced_once=%d, sender_ts=%lu",
+                         perm, isDesynced(), clock_synced_once, sender_timestamp);
+      if (perm == PERM_ACL_ADMIN && isDesynced() && !clock_synced_once) {
+        if (sender_timestamp >= MIN_VALID_TIMESTAMP) {
+          getRTCClock()->setCurrentTime(sender_timestamp);
+          notifyClockSynced(sender.pub_key);
+
+          // Clear repeater buffer - admin sync takes precedence
+          repeater_count = 0;
+          check_netsync_flag = false;
+
+          MESH_DEBUG_PRINTLN("Clock synced from admin login %02X%02X: %lu",
+                            sender.pub_key[0], sender.pub_key[1],
+                            sender_timestamp);
+        } else {
+          MESH_DEBUG_PRINTLN("Admin login but timestamp %lu < MIN_VALID %lu", sender_timestamp, MIN_VALID_TIMESTAMP);
+        }
+      }
+
       client = acl.putClient(sender, 0);  // add to known clients (if not already known)
       if (sender_timestamp <= client->last_timestamp) {
         MESH_DEBUG_PRINTLN("possible replay attack!");
@@ -344,6 +411,30 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
       client->last_activity = getRTCClock()->getCurrentTime();
       client->permissions |= perm;
       memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
+
+      // Print login message for all users (with role)
+      const char* role = client->isAdmin() ? "admin" : "user";
+      Serial.printf("MyMesh: User login: [%02X%02X%02X%02X] (%s)\n",
+                    (uint32_t)client->id.pub_key[0],
+                    (uint32_t)client->id.pub_key[1],
+                    (uint32_t)client->id.pub_key[2],
+                    (uint32_t)client->id.pub_key[3],
+                    role);
+
+      // Reset pre-login attempts for all system messages when admin logs in
+      // (they're now active, so normal delivery tracking applies)
+      int client_idx = -1;
+      for (int i = 0; i < acl.getNumClients(); i++) {
+        if (acl.getClientByIdx(i) == client) {
+          client_idx = i;
+          break;
+        }
+      }
+      if (client_idx >= 0 && client->isAdmin()) {
+        memset(system_msg_prelogin_attempts[client_idx], 0, sizeof(system_msg_prelogin_attempts[client_idx]));
+        MESH_DEBUG_PRINTLN("Admin %02X logged in, reset pre-login attempts", (uint32_t)client->id.pub_key[0]);
+        // Note: Delivery attempts will be logged as they occur in the main loop
+      }
 
       dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
     }
@@ -407,10 +498,27 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     return;
   }
   auto client = acl.getClientByIdx(i);
+
   if (type == PAYLOAD_TYPE_TXT_MSG && len > 5) { // a CLI command or new Post
     uint32_t sender_timestamp;
     memcpy(&sender_timestamp, data, 4); // timestamp (by sender's RTC clock - which could be wrong)
     uint flags = (data[4] >> 2);        // message attempt number, and other flags
+
+    // Clock synchronisation logic - sync from first admin packet with valid timestamp
+    if (isDesynced() && !clock_synced_once && client->isAdmin()) {
+      if (sender_timestamp >= MIN_VALID_TIMESTAMP) {
+        getRTCClock()->setCurrentTime(sender_timestamp);
+        notifyClockSynced(client->id.pub_key);
+
+        // Clear repeater buffer - admin sync takes precedence
+        repeater_count = 0;
+        check_netsync_flag = false;
+
+        MESH_DEBUG_PRINTLN("Clock synced from admin %02X%02X: %lu",
+                          client->id.pub_key[0], client->id.pub_key[1],
+                          sender_timestamp);
+      }
+    }
 
     if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA)) {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported command flags received: flags=%02x", (uint32_t)flags);
@@ -450,11 +558,18 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           temp[5] = 0;      // no reply
           send_ack = false; // no ACK
         } else {
-          if (!is_retry) {
-            addPost(client, (const char *)&data[5]);
+          // Block posting if clock is desynced
+          if (isDesynced()) {
+            strcpy((char*)&temp[5], "Error: Server clock desynced");
+            temp[4] = (TXT_TYPE_CLI_DATA << 2); // Send error as CLI_DATA
+            send_ack = false; // No ACK for error
+          } else {
+            if (!is_retry) {
+              addPost(client, (const char *)&data[5]);
+            }
+            temp[5] = 0; // no reply (ACK is enough)
+            send_ack = true;
           }
-          temp[5] = 0; // no reply (ACK is enough)
-          send_ack = true;
         }
       }
 
@@ -604,6 +719,18 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   dirty_contacts_expiry = 0;
   _logging = false;
   set_radio_at = revert_radio_at = 0;
+  current_boot_sequence = 0;
+  system_msgs = new SystemMessageQueue();
+  clock_synced_once = false;
+
+  // Network time sync initialisation
+  repeater_count = 0;
+  check_netsync_flag = false;
+  memset(&netsync_config, 0, sizeof(netsync_config));
+  memset(repeater_buffer, 0, sizeof(repeater_buffer));
+  netsync_config.enabled = 0;         // Default: disabled (admin sync preferred)
+  netsync_config.maxwait_mins = 15;   // Default: 15 minutes
+  netsync_config.guard = 0xDEADBEEF;  // Validation marker
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -632,16 +759,368 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   next_client_idx = 0;
   next_push = 0;
   memset(posts, 0, sizeof(posts));
+  memset(pending_system_msg_idx, -1, sizeof(pending_system_msg_idx));  // -1 = no pending system message
+  memset(system_msg_prelogin_attempts, 0, sizeof(system_msg_prelogin_attempts));  // 0 = no attempts yet
   _num_posted = _num_post_pushes = 0;
 }
+
+uint32_t MyMesh::loadBootCounter(FILESYSTEM* fs) {
+  if (!fs->exists("/boot_count")) return 0;
+
+#if defined(RP2040_PLATFORM)
+  File file = fs->open("/boot_count", "r");
+#else
+  File file = fs->open("/boot_count");
+#endif
+
+  if (file) {
+    uint32_t count = 0;
+    file.read((uint8_t*)&count, 4);
+    file.close();
+    return count;
+  }
+  return 0;
+}
+
+void MyMesh::saveBootCounter(FILESYSTEM* fs, uint32_t count) {
+  File file = openFileForWrite("/boot_count");
+
+  if (file) {
+    file.write((uint8_t*)&count, 4);
+    file.close();
+  }
+}
+
+bool MyMesh::isDesynced() const {
+  return getRTCClock()->getCurrentTime() < MIN_VALID_TIMESTAMP;
+}
+
+void MyMesh::notifyClockSynced(const uint8_t* admin_pubkey) {
+  if (!clock_synced_once) {
+    clock_synced_once = true;
+
+    // Add system message announcing successful sync
+    char sync_msg[MAX_POST_TEXT_LEN + 1];
+    if (admin_pubkey) {
+      sprintf(sync_msg, "Clock synced by admin [%02X%02X%02X%02X]. Server now in read-write mode.",
+              admin_pubkey[0], admin_pubkey[1], admin_pubkey[2], admin_pubkey[3]);
+    } else {
+      strcpy(sync_msg, "Clock synced manually. Server now in read-write mode.");
+    }
+    addSystemMessage(sync_msg);
+  }
+}
+
+void MyMesh::addSystemMessage(const char* message) {
+  // Format: "SYSTEM: boot:[n] msg:[user message]"
+  // This ensures each boot's messages are unique for companion app deduplication
+  char formatted_msg[MAX_POST_TEXT_LEN + 1];
+  snprintf(formatted_msg, sizeof(formatted_msg), "SYSTEM: boot:%u msg:%s",
+           current_boot_sequence, message);
+
+  system_msgs->addMessage(formatted_msg, current_boot_sequence);
+  system_msgs->save(_fs);
+  // Note: Serial output now handled by SystemMessageQueue::addMessage()
+  MESH_DEBUG_PRINTLN("Added system message (boot %u), now have %d messages",
+                     current_boot_sequence, system_msgs->getNumMessages());
+}
+
+// ----------------------- Network Time Synchronisation -----------------------
+
+void MyMesh::loadNetSyncConfig() {
+  File f = _fs->open("/netsync_cfg", "r");
+  if (f) {
+    ClockNetSyncConfig loaded_config;
+    size_t bytes_read = f.read((uint8_t*)&loaded_config, sizeof(loaded_config));
+    f.close();
+
+    // Validate and apply
+    if (bytes_read == sizeof(loaded_config) && loaded_config.guard == 0xDEADBEEF) {
+      // Range check maxwait_mins
+      if (loaded_config.maxwait_mins >= 5 && loaded_config.maxwait_mins <= 60) {
+        netsync_config = loaded_config;
+        MESH_DEBUG_PRINTLN("Loaded network time sync config: enabled=%d, maxwait=%d min",
+                          netsync_config.enabled, netsync_config.maxwait_mins);
+      } else {
+        MESH_DEBUG_PRINTLN("Invalid maxwait_mins in config, using defaults");
+      }
+    } else {
+      MESH_DEBUG_PRINTLN("Invalid network time sync config, using defaults");
+    }
+  } else {
+    MESH_DEBUG_PRINTLN("No network time sync config found, using defaults");
+  }
+}
+
+void MyMesh::saveNetSyncConfig() {
+  File f = openFileForWrite("/netsync_cfg");
+  if (f) {
+    f.write((uint8_t*)&netsync_config, sizeof(netsync_config));
+    f.close();
+    MESH_DEBUG_PRINTLN("Saved network time sync config");
+  }
+}
+
+void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp,
+                          const uint8_t* app_data, size_t app_data_len) {
+  // Only process if clock not synced yet
+  if (clock_synced_once || !isDesynced() || !netsync_config.enabled) {
+    return;  // Already synced, desynced but functional, or feature disabled
+  }
+
+  // Parse advert type
+  AdvertDataParser parser(app_data, app_data_len);
+  if (parser.getType() != ADV_TYPE_REPEATER) {
+    return;  // Not a repeater advert
+  }
+
+  // Validate timestamp
+  if (timestamp < MIN_VALID_TIMESTAMP) {
+    MESH_DEBUG_PRINTLN("Repeater advert has invalid timestamp %lu < %lu", timestamp, MIN_VALID_TIMESTAMP);
+    return;  // Too old
+  }
+
+  // Check if we already have this repeater (by first 4 bytes of pub_key)
+  bool already_stored = false;
+  for (int i = 0; i < repeater_count; i++) {
+    if (memcmp(repeater_buffer[i].pub_key, id.pub_key, 4) == 0) {
+      // Update timestamp from same repeater (take newer)
+      if (timestamp > repeater_buffer[i].timestamp) {
+        repeater_buffer[i].timestamp = timestamp;
+        repeater_buffer[i].received_time = getRTCClock()->getCurrentTime();
+        MESH_DEBUG_PRINTLN("Updated repeater [%02X%02X%02X%02X] timestamp to %lu",
+                          id.pub_key[0], id.pub_key[1], id.pub_key[2], id.pub_key[3], timestamp);
+      }
+      already_stored = true;
+      break;
+    }
+  }
+
+  if (!already_stored) {
+    // Add new repeater
+    if (repeater_count < 3) {
+      memcpy(repeater_buffer[repeater_count].pub_key, id.pub_key, 4);
+      repeater_buffer[repeater_count].timestamp = timestamp;
+      repeater_buffer[repeater_count].received_time = getRTCClock()->getCurrentTime();
+      repeater_count++;
+      MESH_DEBUG_PRINTLN("Added repeater [%02X%02X%02X%02X] to buffer (count=%d/3), timestamp=%lu",
+                        id.pub_key[0], id.pub_key[1], id.pub_key[2], id.pub_key[3],
+                        repeater_count, timestamp);
+    } else {
+      // Buffer full - replace oldest by received_time
+      int oldest_idx = 0;
+      uint32_t oldest_time = repeater_buffer[0].received_time;
+      for (int i = 1; i < 3; i++) {
+        if (repeater_buffer[i].received_time < oldest_time) {
+          oldest_time = repeater_buffer[i].received_time;
+          oldest_idx = i;
+        }
+      }
+      MESH_DEBUG_PRINTLN("Buffer full, replacing oldest repeater [%02X%02X%02X%02X]",
+                        repeater_buffer[oldest_idx].pub_key[0], repeater_buffer[oldest_idx].pub_key[1],
+                        repeater_buffer[oldest_idx].pub_key[2], repeater_buffer[oldest_idx].pub_key[3]);
+      memcpy(repeater_buffer[oldest_idx].pub_key, id.pub_key, 4);
+      repeater_buffer[oldest_idx].timestamp = timestamp;
+      repeater_buffer[oldest_idx].received_time = getRTCClock()->getCurrentTime();
+    }
+
+    check_netsync_flag = true;  // Signal to check for sync
+  }
+}
+
+void MyMesh::checkNetworkTimeSync() {
+  if (!check_netsync_flag) return;
+  check_netsync_flag = false;
+
+  if (clock_synced_once || !isDesynced() || !netsync_config.enabled) {
+    return;  // Already synced, desynced but functional, or feature disabled
+  }
+
+  if (repeater_count < 3) {
+    return;  // Need at least 3
+  }
+
+  // Age out old adverts (older than maxwait from current time)
+  uint32_t now = getRTCClock()->getCurrentTime();
+  uint32_t maxwait_secs = netsync_config.maxwait_mins * 60;
+
+  for (int i = 0; i < repeater_count; ) {
+    // Note: Our clock might be wrong (year 2000), so this aging might not work correctly
+    // However, once we get close to syncing, it should be more accurate
+    // The agreement check below is the primary filter
+    if (now > MIN_VALID_TIMESTAMP && now > repeater_buffer[i].received_time + maxwait_secs) {
+      // Remove old advert (shift array)
+      MESH_DEBUG_PRINTLN("Aging out old repeater advert [%02X%02X%02X%02X]",
+                        repeater_buffer[i].pub_key[0], repeater_buffer[i].pub_key[1],
+                        repeater_buffer[i].pub_key[2], repeater_buffer[i].pub_key[3]);
+      for (int j = i; j < repeater_count - 1; j++) {
+        repeater_buffer[j] = repeater_buffer[j + 1];
+      }
+      repeater_count--;
+    } else {
+      i++;
+    }
+  }
+
+  if (repeater_count < 3) {
+    MESH_DEBUG_PRINTLN("After aging, only %d/3 repeaters remain", repeater_count);
+    return;  // After aging, not enough left
+  }
+
+  // Check: All timestamps within maxwait of each other?
+  uint32_t min_ts = repeater_buffer[0].timestamp;
+  uint32_t max_ts = repeater_buffer[0].timestamp;
+  int most_recent_idx = 0;
+
+  for (int i = 1; i < repeater_count; i++) {
+    if (repeater_buffer[i].timestamp < min_ts) min_ts = repeater_buffer[i].timestamp;
+    if (repeater_buffer[i].timestamp > max_ts) {
+      max_ts = repeater_buffer[i].timestamp;
+      most_recent_idx = i;
+    }
+  }
+
+  uint32_t span_secs = max_ts - min_ts;
+  MESH_DEBUG_PRINTLN("Timestamp span: %lu seconds (max=%lu, min=%lu, maxwait=%lu)",
+                    span_secs, max_ts, min_ts, maxwait_secs);
+
+  if (span_secs > maxwait_secs) {
+    // Disagreement too large - discard oldest by received_time and wait
+    int oldest_idx = 0;
+    uint32_t oldest_time = repeater_buffer[0].received_time;
+    for (int i = 1; i < repeater_count; i++) {
+      if (repeater_buffer[i].received_time < oldest_time) {
+        oldest_time = repeater_buffer[i].received_time;
+        oldest_idx = i;
+      }
+    }
+
+    MESH_DEBUG_PRINTLN("Span exceeds maxwait, discarding oldest repeater [%02X%02X%02X%02X]",
+                      repeater_buffer[oldest_idx].pub_key[0], repeater_buffer[oldest_idx].pub_key[1],
+                      repeater_buffer[oldest_idx].pub_key[2], repeater_buffer[oldest_idx].pub_key[3]);
+
+    // Remove oldest
+    for (int j = oldest_idx; j < repeater_count - 1; j++) {
+      repeater_buffer[j] = repeater_buffer[j + 1];
+    }
+    repeater_count--;
+    return;  // Wait for next advert
+  }
+
+  // All agree! Use most recent timestamp
+  uint32_t sync_timestamp = repeater_buffer[most_recent_idx].timestamp;
+
+  // Monotonic check: timestamp should be > our current time
+  // (If our clock is year 2000, this will pass. If our clock is already reasonable, verify forward movement)
+  if (now > MIN_VALID_TIMESTAMP && sync_timestamp <= now) {
+    // Timestamp is in past or present - probably wrong, discard all and restart
+    MESH_DEBUG_PRINTLN("Most recent timestamp %lu <= current time %lu, discarding all and restarting",
+                      sync_timestamp, now);
+    repeater_count = 0;
+    return;
+  }
+
+  // Sync!
+  MESH_DEBUG_PRINTLN("Network time sync: Setting clock to %lu from repeater [%02X%02X%02X%02X]",
+                    sync_timestamp,
+                    repeater_buffer[most_recent_idx].pub_key[0],
+                    repeater_buffer[most_recent_idx].pub_key[1],
+                    repeater_buffer[most_recent_idx].pub_key[2],
+                    repeater_buffer[most_recent_idx].pub_key[3]);
+
+  getRTCClock()->setCurrentTime(sync_timestamp);
+  clock_synced_once = true;
+
+  // Create system message with details
+  notifyClockSyncedFromRepeaters();
+
+  // Clear buffer
+  repeater_count = 0;
+}
+
+void MyMesh::notifyClockSyncedFromRepeaters() {
+  char msg[MAX_POST_TEXT_LEN + 1];
+  char temp[80];
+
+  // Find most recent timestamp and its repeater
+  int most_recent_idx = 0;
+  uint32_t max_ts = repeater_buffer[0].timestamp;
+  for (int i = 1; i < repeater_count; i++) {
+    if (repeater_buffer[i].timestamp > max_ts) {
+      max_ts = repeater_buffer[i].timestamp;
+      most_recent_idx = i;
+    }
+  }
+
+  // Format: "Clock set by Repeater advert from [AABBCCDD] to 01 Jan 2025 10:30. Quorum nodes: [AAAAAAAA], [BBBBBBBB], [CCCCCCCC]."
+  DateTime dt(max_ts);
+  const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+  sprintf(msg, "Clock set by Repeater advert from [%02X%02X%02X%02X] to %02d %s %04d %02d:%02d. Quorum nodes: ",
+          repeater_buffer[most_recent_idx].pub_key[0],
+          repeater_buffer[most_recent_idx].pub_key[1],
+          repeater_buffer[most_recent_idx].pub_key[2],
+          repeater_buffer[most_recent_idx].pub_key[3],
+          dt.day(),
+          months[dt.month() - 1],
+          dt.year(),
+          dt.hour(),
+          dt.minute());
+
+  // Add all repeater IDs to quorum list
+  for (int i = 0; i < repeater_count && i < 3; i++) {
+    sprintf(temp, "[%02X%02X%02X%02X]",
+            repeater_buffer[i].pub_key[0],
+            repeater_buffer[i].pub_key[1],
+            repeater_buffer[i].pub_key[2],
+            repeater_buffer[i].pub_key[3]);
+    strcat(msg, temp);
+    if (i < repeater_count - 1) strcat(msg, ", ");
+  }
+  strcat(msg, ".");
+
+  addSystemMessage(msg);
+}
+
+// ----------------------------------------------------------------------------
 
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
   _fs = fs;
+
+  // Load and increment boot counter
+  current_boot_sequence = loadBootCounter(_fs);
+  current_boot_sequence++;
+  saveBootCounter(_fs, current_boot_sequence);
+
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
   acl.load(_fs);
+
+  // Load persisted posts
+  loadPosts();
+
+  // Load system message queue
+  system_msgs->load(_fs);
+  MESH_DEBUG_PRINTLN("Loaded %d system messages from flash", system_msgs->getNumMessages());
+
+  // Load network time sync configuration
+  loadNetSyncConfig();
+
+  // Wait 5 seconds for Serial console to initialise before creating system messages
+  MESH_DEBUG_PRINTLN("Waiting 5 seconds for Serial console initialisation...");
+  delay(5000);
+
+  // Check current clock state
+  uint32_t current_time = getRTCClock()->getCurrentTime();
+  MESH_DEBUG_PRINTLN("RTC current_time=%lu, MIN_VALID=%lu, isDesynced=%d",
+                     current_time, MIN_VALID_TIMESTAMP, isDesynced());
+
+  // If clock is desynced, add system message
+  if (isDesynced()) {
+    addSystemMessage("Server rebooted. Clock desynced - read-only until admin login.");
+  }
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);
@@ -781,20 +1260,67 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
-  } else if (memcmp(command, "addbulletin ", 12) == 0) {
-    const char* bulletin_text = &command[12];
-    int text_len = strlen(bulletin_text);
-    
-    if (text_len == 0) {
-      strcpy(reply, "Error: Empty bulletin");
-    } else if (text_len > MAX_POST_TEXT_LEN) {
-      sprintf(reply, "Error: Max %d chars", MAX_POST_TEXT_LEN);
+  } else if (sender_timestamp == 0 && memcmp(command, "addbulletin ", 12) == 0) {
+    // Serial-only command (server admin can post bulletins)
+    if (isDesynced()) {
+      strcpy(reply, "Error: Clock not synced");
     } else {
-      addBulletin(bulletin_text);
-      strcpy(reply, "Bulletin added");
+      const char* bulletin_text = &command[12];
+      int text_len = strlen(bulletin_text);
+
+      if (text_len == 0) {
+        strcpy(reply, "Error: Empty bulletin");
+      } else if (text_len > MAX_POST_TEXT_LEN) {
+        sprintf(reply, "Error: Max %d chars", MAX_POST_TEXT_LEN);
+      } else {
+        addBulletin(bulletin_text);
+        strcpy(reply, "Bulletin added");
+      }
     }
-  } else{
+  }
+  // Network time sync CLI commands
+  else if (memcmp(command, "set nettime.enable ", 19) == 0) {
+    const char* val = &command[19];
+    if (strcmp(val, "on") == 0) {
+      netsync_config.enabled = 1;
+      saveNetSyncConfig();
+      strcpy(reply, "OK - Network time sync enabled");
+    } else if (strcmp(val, "off") == 0) {
+      netsync_config.enabled = 0;
+      saveNetSyncConfig();
+      strcpy(reply, "OK - Network time sync disabled");
+    } else {
+      strcpy(reply, "Error: Use 'on' or 'off'");
+    }
+  } else if (strcmp(command, "get nettime.enable") == 0) {
+    strcpy(reply, netsync_config.enabled ? "on" : "off");
+  } else if (memcmp(command, "set nettime.maxwait ", 20) == 0) {
+    int mins = atoi(&command[20]);
+    if (mins >= 5 && mins <= 60) {
+      netsync_config.maxwait_mins = mins;
+      saveNetSyncConfig();
+      sprintf(reply, "OK - Max wait set to %d minutes", mins);
+    } else {
+      strcpy(reply, "Error: Range 5-60 minutes");
+    }
+  } else if (strcmp(command, "get nettime.maxwait") == 0) {
+    sprintf(reply, "%d", netsync_config.maxwait_mins);
+  } else if (strcmp(command, "get nettime.status") == 0) {
+    if (clock_synced_once || !isDesynced()) {
+      strcpy(reply, "Clock already synced");
+    } else if (!netsync_config.enabled) {
+      strcpy(reply, "Network time sync disabled");
+    } else {
+      sprintf(reply, "Waiting for repeaters (%d/3)", repeater_count);
+    }
+  } else {
+    bool was_desynced = isDesynced();
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
+
+    // If clock was desynced and now isn't, notify clock sync
+    if (was_desynced && !isDesynced()) {
+      notifyClockSynced(NULL);  // NULL = manual sync via CLI
+    }
   }
 }
 
@@ -805,6 +1331,11 @@ bool MyMesh::saveFilter(ClientInfo* client) {
 void MyMesh::loop() {
   mesh::Mesh::loop();
 
+  // Check for network time synchronisation (only when flag is set)
+  if (check_netsync_flag) {
+    checkNetworkTimeSync();
+  }
+
   if (millisHasNowPassed(next_push) && acl.getNumClients() > 0) {
     // check for ACK timeouts
     for (int i = 0; i < acl.getNumClients(); i++) {
@@ -812,15 +1343,95 @@ void MyMesh::loop() {
       if (c->extra.room.pending_ack && millisHasNowPassed(c->extra.room.ack_timeout)) {
         c->extra.room.push_failures++;
         c->extra.room.pending_ack = 0; // reset  (TODO: keep prev expected_ack's in a list, incase they arrive LATER, after we retry)
+
+        // Clear pending system message index to allow retry
+        if (pending_system_msg_idx[i] >= 0) {
+          MESH_DEBUG_PRINTLN("System message %d ACK timeout for client %02X, will retry", pending_system_msg_idx[i], (uint32_t)c->id.pub_key[0]);
+          pending_system_msg_idx[i] = -1;
+        }
+
         MESH_DEBUG_PRINTLN("pending ACK timed out: push_failures: %d", (uint32_t)c->extra.room.push_failures);
       }
     }
     // check next Round-Robin client, and sync next new post
     auto client = acl.getClientByIdx(next_client_idx);
     bool did_push = false;
-    if (client->extra.room.pending_ack == 0 && client->last_activity != 0 &&
+
+    // Check for pending system messages first (admin-only)
+    // System messages can be sent to non-logged-in admins (up to 3 pre-login attempts)
+    if (client->extra.room.pending_ack == 0 && client->isAdmin()) {
+      bool is_active = (client->last_activity != 0);
+
+      MESH_DEBUG_PRINTLN("loop - checking for client %02X, isAdmin=%d, is_active=%d, num_sys_msgs=%d",
+                         (uint32_t)client->id.pub_key[0], client->isAdmin(), is_active, system_msgs->getNumMessages());
+
+      for (int i = 0; i < system_msgs->getNumMessages(); i++) {
+        bool needs_push = system_msgs->needsPush(i, client);
+
+        // Check delivery attempt limit for ALL admins (both active and inactive)
+        if (system_msg_prelogin_attempts[next_client_idx][i] >= 3) {
+          MESH_DEBUG_PRINTLN("  sys_msg[%d]: skipping, attempts exhausted (%d/3)",
+                             i, system_msg_prelogin_attempts[next_client_idx][i]);
+          continue;
+        }
+
+        MESH_DEBUG_PRINTLN("  sys_msg[%d]: needsPush=%d, attempts=%d",
+                           i, needs_push, system_msg_prelogin_attempts[next_client_idx][i]);
+
+        if (needs_push) {
+          SystemMessage* sys_msg = system_msgs->getMessage(i);
+
+          // Create temporary PostInfo with timestamp=0 for system message
+          PostInfo temp_post;
+          temp_post.author = self_id;
+          temp_post.post_timestamp = 0;  // Special: system message marker
+          StrHelper::strncpy(temp_post.text, sys_msg->text, sizeof(temp_post.text));
+
+          pushPostToClient(client, temp_post);
+
+          // Store which system message is awaiting ACK (don't mark as delivered yet)
+          pending_system_msg_idx[next_client_idx] = i;
+
+          // Increment attempt counter for ALL admins (both active and inactive)
+          system_msg_prelogin_attempts[next_client_idx][i]++;
+          int attempt_num = system_msg_prelogin_attempts[next_client_idx][i];
+
+          if (!is_active) {
+            MESH_DEBUG_PRINTLN("loop - pushed system message %d to INACTIVE admin %02X (attempt %d/3), awaiting ACK",
+                               i, (uint32_t)client->id.pub_key[0], attempt_num);
+          } else {
+            MESH_DEBUG_PRINTLN("loop - pushed system message %d to ACTIVE admin %02X (attempt %d/3), awaiting ACK",
+                               i, (uint32_t)client->id.pub_key[0], attempt_num);
+          }
+
+          // Always-on Serial output for production monitoring
+          Serial.printf("SystemMessageQueue: Message %d delivery attempt %d/3 to admin [%02X%02X%02X%02X]\n",
+                        i,
+                        attempt_num,
+                        (uint32_t)client->id.pub_key[0],
+                        (uint32_t)client->id.pub_key[1],
+                        (uint32_t)client->id.pub_key[2],
+                        (uint32_t)client->id.pub_key[3]);
+
+          // If this was the 3rd and final attempt, note it immediately
+          if (attempt_num >= 3) {
+            Serial.printf("SystemMessageQueue: Message %d attempts exhausted for admin [%02X%02X%02X%02X] - queued until next login\n",
+                          i,
+                          (uint32_t)client->id.pub_key[0],
+                          (uint32_t)client->id.pub_key[1],
+                          (uint32_t)client->id.pub_key[2],
+                          (uint32_t)client->id.pub_key[3]);
+          }
+
+          did_push = true;
+          break;  // One message per iteration
+        }
+      }
+    }
+
+    // Push regular posts only if client is active and no system message was pushed
+    if (!did_push && client->extra.room.pending_ack == 0 && client->last_activity != 0 &&
         client->extra.room.push_failures < 3) { // not already waiting for ACK, AND not evicted, AND retries not max
-      MESH_DEBUG_PRINTLN("loop - checking for client %02X", (uint32_t)client->id.pub_key[0]);
       uint32_t now = getRTCClock()->getCurrentTime();
       for (int k = 0, idx = next_post_idx; k < MAX_UNSYNCED_POSTS; k++) {
         auto p = &posts[idx];
@@ -879,5 +1490,173 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
+  // Periodic cleanup of fully-delivered system messages
+  static unsigned long next_sys_msg_cleanup = 0;
+  if (millisHasNowPassed(next_sys_msg_cleanup)) {
+    int old_count = system_msgs->getNumMessages();
+    system_msgs->cleanup(&acl);
+    int new_count = system_msgs->getNumMessages();
+    if (new_count < old_count) {
+      system_msgs->save(_fs);  // Save if messages were removed
+      MESH_DEBUG_PRINTLN("System message cleanup: removed %d messages", old_count - new_count);
+    }
+    next_sys_msg_cleanup = futureMillis(60000);  // Cleanup every minute
+  }
+
+#ifdef DISPLAY_CLASS
+  // Notify UI when new posts are added
+  static int last_post_idx_ui = -1;
+
+  if (next_post_idx != last_post_idx_ui) {
+    // New post was added - trigger UI notification
+    // UI will query getRecentPosts() directly to display
+    ui_task.notify(UIEventType::roomMessage);
+    last_post_idx_ui = next_post_idx;
+  }
+#endif
+
   // TODO: periodically check for OLD/inactive entries in known_clients[], and evict
+}
+
+void MyMesh::savePosts() {
+  if (!_fs) return;
+
+  // Open file for writing
+  File f = openFileForWrite(POSTS_FILE);
+
+  if (!f) {
+    MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file for writing");
+    return;
+  }
+
+  // Write header: version and next_post_idx
+  uint8_t version = 1;
+  bool success = (f.write(&version, 1) == 1);
+  success = success && (f.write((uint8_t*)&next_post_idx, sizeof(next_post_idx)) == sizeof(next_post_idx));
+
+  if (!success) {
+    MESH_DEBUG_PRINTLN("ERROR: Failed to write posts header");
+    f.close();
+    return;
+  }
+
+  // Write all posts in the circular buffer (skip system messages with timestamp=0)
+  for (int i = 0; i < MAX_UNSYNCED_POSTS; i++) {
+    PostInfo* p = &posts[i];
+
+    // Skip system messages (timestamp=0) - don't persist to flash
+    if (p->post_timestamp == 0) {
+      continue;
+    }
+
+    // Write author public key only (Identity only has pub_key)
+    success = (f.write(p->author.pub_key, PUB_KEY_SIZE) == PUB_KEY_SIZE);
+
+    // Write timestamp
+    success = success && (f.write((uint8_t*)&p->post_timestamp, sizeof(p->post_timestamp)) == sizeof(p->post_timestamp));
+
+    // Write text length and text
+    uint8_t text_len = strlen(p->text);
+    success = success && (f.write(&text_len, 1) == 1);
+    if (text_len > 0) {
+      success = success && (f.write((uint8_t*)p->text, text_len) == text_len);
+    }
+
+    if (!success) {
+      MESH_DEBUG_PRINTLN("ERROR: Failed to write post record");
+      break;  // Stop writing on error
+    }
+  }
+
+  f.close();
+  MESH_DEBUG_PRINTLN("Posts saved to flash");
+}
+
+void MyMesh::loadPosts() {
+  if (!_fs) return;
+
+  if (!_fs->exists(POSTS_FILE)) {
+    MESH_DEBUG_PRINTLN("No posts file found - starting fresh");
+    return;
+  }
+
+  // Open file for reading (platform-specific pattern from companion_radio DataStore)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  File f = _fs->open(POSTS_FILE, FILE_O_READ);
+#elif defined(RP2040_PLATFORM)
+  File f = _fs->open(POSTS_FILE, "r");
+#else
+  File f = _fs->open(POSTS_FILE, "r", false);
+#endif
+
+  if (!f) {
+    MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file for reading");
+    return;
+  }
+
+  // Read header
+  uint8_t version;
+  if (f.read(&version, 1) != 1 || version != 1) {
+    MESH_DEBUG_PRINTLN("ERROR: Invalid posts file version");
+    f.close();
+    return;
+  }
+
+  if (f.read((uint8_t*)&next_post_idx, sizeof(next_post_idx)) != sizeof(next_post_idx)) {
+    MESH_DEBUG_PRINTLN("ERROR: Failed to read next_post_idx");
+    f.close();
+    return;
+  }
+
+  // Read all posts
+  for (int i = 0; i < MAX_UNSYNCED_POSTS; i++) {
+    PostInfo* p = &posts[i];
+
+    // Read author public key only (Identity only has pub_key)
+    if (f.read(p->author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+
+    // Read timestamp
+    if (f.read((uint8_t*)&p->post_timestamp, sizeof(p->post_timestamp)) != sizeof(p->post_timestamp)) break;
+
+    // Read text length and text
+    uint8_t text_len;
+    if (f.read(&text_len, 1) != 1) break;
+
+    if (text_len > 0 && text_len <= MAX_POST_TEXT_LEN) {
+      if (f.read((uint8_t*)p->text, text_len) != text_len) break;
+      p->text[text_len] = '\0';
+    } else {
+      p->text[0] = '\0';
+    }
+  }
+
+  f.close();
+  MESH_DEBUG_PRINTLN("Posts loaded from flash");
+}
+
+int MyMesh::getRecentPosts(const PostInfo** dest, int max_posts) const {
+  // Return up to max_posts, starting from newest (skip timestamp=0 entries)
+  int returned = 0;
+  int checked = 0;
+
+  while (returned < max_posts && checked < MAX_UNSYNCED_POSTS) {
+    // newest = next_post_idx - 1, next newest = next_post_idx - 2, etc.
+    int idx = (next_post_idx - 1 - checked + MAX_UNSYNCED_POSTS) % MAX_UNSYNCED_POSTS;
+
+    if (posts[idx].post_timestamp > 0) {  // Skip system messages
+      dest[returned] = &posts[idx];
+      returned++;
+    }
+    checked++;
+  }
+
+  return returned;  // Returns 0 if no posts found
+}
+
+void MyMesh::notifyUIOfLoadedPosts() {
+#ifdef DISPLAY_CLASS
+  // Trigger UI refresh to show loaded posts (UI now queries directly via getRecentPosts)
+  ui_task.notify(UIEventType::roomMessage);
+  MESH_DEBUG_PRINTLN("Triggered UI refresh for loaded posts");
+#endif
 }

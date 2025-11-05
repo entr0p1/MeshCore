@@ -5,12 +5,27 @@
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
-  static UITask ui_task(display);
+  #include "AbstractUITask.h"
+
+  // Stub serial interface (bulletin board doesn't use BLE/serial like companion_radio)
+  class StubSerial : public BaseSerialInterface {
+  public:
+    bool isEnabled() const override { return false; }
+    void enable() override {}
+    void disable() override {}
+    bool isConnected() const override { return false; }
+    bool isWriteBusy() const override { return false; }
+    size_t writeFrame(const uint8_t src[], size_t len) override { return 0; }
+    size_t checkRecvFrame(uint8_t dest[]) override { return 0; }
+  } stub_serial;
+
+  UITask ui_task(&board, &stub_serial);
 #endif
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
-MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
+static ArduinoMillis millis_clock;
+MyMesh the_mesh(board, radio_driver, millis_clock, fast_rng, rtc_clock, tables);
 
 void halt() {
   while (1) ;
@@ -73,7 +88,7 @@ void setup() {
   the_mesh.begin(fs);
 
 #ifdef DISPLAY_CLASS
-  ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
+  ui_task.begin(&display, &sensors, the_mesh.getNodePrefs());
 #endif
 
   // send out initial Advertisement to the mesh
@@ -81,6 +96,16 @@ void setup() {
 }
 
 void loop() {
+#ifdef DISPLAY_CLASS
+  // Notify UI of loaded posts on first loop iteration
+  // newMsg() won't interrupt splash screen, so this is safe to call early
+  static bool posts_notified = false;
+  if (!posts_notified) {
+    the_mesh.notifyUIOfLoadedPosts();
+    posts_notified = true;
+  }
+#endif
+
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();

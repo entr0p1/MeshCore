@@ -1,19 +1,57 @@
 #pragma once
 
+#include <MeshCore.h>
 #include <helpers/ui/DisplayDriver.h>
+#include <helpers/ui/UIScreen.h>
+#include <helpers/SensorManager.h>
+#include <helpers/BaseSerialInterface.h>
+#include <Arduino.h>
+#include <helpers/sensors/LPPDataHelpers.h>
 #include <helpers/CommonCLI.h>
 
-class UITask {
+#include "AbstractUITask.h"
+
+// UI task for bulletin board - handles display screens, input, and message preview
+class UITask : public AbstractUITask {
   DisplayDriver* _display;
-  unsigned long _next_read, _next_refresh, _auto_off;
-  int _prevBtnState;
+  SensorManager* _sensors;
+  unsigned long _next_refresh, _auto_off;
   NodePrefs* _node_prefs;
-  char _version_info[32];
+  char _alert[80];
+  unsigned long _alert_expiry;
+  unsigned long ui_started_at, next_batt_chck;
+#ifdef PIN_STATUS_LED
+  int led_state = 0;
+  int next_led_change = 0;
+  int last_led_increment = 0;
+#endif
 
-  void renderCurrScreen();
+  UIScreen* splash;
+  UIScreen* status_screen;
+  UIScreen* radio_config;
+  UIScreen* msg_preview;
+  UIScreen* curr;
+
+  void userLedHandler();
+  char checkDisplayOn(char c);
+  char handleLongPress(char c);
+  void setCurrScreen(UIScreen* c);
+
 public:
-  UITask(DisplayDriver& display) : _display(&display) { _next_read = _next_refresh = 0; }
-  void begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version);
+  UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
+    : AbstractUITask(board, serial), _display(NULL), _sensors(NULL) {
+    next_batt_chck = _next_refresh = 0;
+    ui_started_at = 0;
+    curr = NULL;
+  }
 
-  void loop();
+  void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
+  void gotoStatusScreen();
+  void gotoRadioConfigScreen();
+  void gotoFirstMessage();
+  void showAlert(const char* text, int duration_millis);
+
+  // from AbstractUITask
+  void notify(UIEventType t = UIEventType::none) override;
+  void loop() override;
 };
