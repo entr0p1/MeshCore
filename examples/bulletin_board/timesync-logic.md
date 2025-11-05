@@ -844,22 +844,3 @@ static bool clock_synced_once = false;
 3. **Relevance filtering**: Sync clock, verify desync messages not delivered to late-joining admin
 4. **UI filtering**: Verify system messages hidden from local display
 5. **Flash round-trip**: Save and load system messages, verify integrity
-
----
-
-## Conclusion
-
-The clock synchronisation system provides:
-
-✅ **Fully automatic** time sync with zero user intervention
-✅ **Multiple sync sources** - admin login, admin messages, manual CLI, and repeater advertisements
-✅ **Robust fallback** - network time sync from repeater infrastructure when no admin available
-✅ **Quorum consensus** - requires 3 repeaters to agree, preventing single point of failure
-✅ **Secure** - admin-only direct sync, cryptographically verified repeater adverts, configurable tolerance
-✅ **Reliable** - one-time sync prevents time regression, monotonic enforcement
-✅ **Informative** - system messages keep admins aware of server state and sync source
-✅ **Persistent** - system messages survive reboots and track delivery
-✅ **Clean** - automatic cleanup prevents message accumulation
-✅ **Configurable** - network sync can be enabled/disabled and tuned via CLI commands
-
-This architecture ensures the bulletin board server maintains accurate time for post ordering and synchronisation, with multiple sync pathways for maximum reliability, while handling edge cases gracefully and keeping admins informed.
