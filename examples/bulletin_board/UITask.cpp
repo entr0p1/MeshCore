@@ -471,7 +471,8 @@ void UITask::gotoFirstMessage() {
 }
 
 void UITask::showAlert(const char* text, int duration_millis) {
-  strcpy(_alert, text);
+  strncpy(_alert, text, sizeof(_alert) - 1);
+  _alert[sizeof(_alert) - 1] = '\0';  // Ensure null termination
   _alert_expiry = millis() + duration_millis;
 }
 
@@ -510,8 +511,11 @@ void UITask::setCurrScreen(UIScreen* c) {
 
 void UITask::loop() {
   char c = 0;
+#if defined(PIN_USER_BTN) || defined(PIN_USER_BTN_ANA)
+  int ev = 0;
+#endif
 #if defined(PIN_USER_BTN)
-  int ev = user_btn.check();
+  ev = user_btn.check();
   if (ev == BUTTON_EVENT_CLICK) {
     c = checkDisplayOn(KEY_NEXT);
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
