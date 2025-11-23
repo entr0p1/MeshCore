@@ -14,7 +14,7 @@
 #include "helpers/ClientACL.h"
 
 #ifndef MAX_POST_TEXT_LEN
-  #define MAX_POST_TEXT_LEN (160 - 9)
+  #define MAX_POST_TEXT_LEN 140  // User message limit (prefix added on top)
 #endif
 
 #define MAX_SYSTEM_MESSAGES 8  // Keep a small queue of recent system messages

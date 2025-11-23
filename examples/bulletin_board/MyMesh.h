@@ -18,6 +18,7 @@
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/CommonCLI.h>
+#include <helpers/StatsFormatHelper.h>
 #include <helpers/ClientACL.h>
 #include <RTClib.h>
 #include <target.h>
@@ -32,8 +33,10 @@ class SystemMessageQueue;
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.9.1"
+  #define FIRMWARE_VERSION   "v1.0.0"
 #endif
+
+#define MESHCORE_VERSION "1.10.0"
 
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0
@@ -77,17 +80,47 @@ class SystemMessageQueue;
   #define TXT_ACK_DELAY     200
 #endif
 
+#define BULLETIN_RATE_LIMIT_MILLIS  10000  // 10 seconds between bulletin posts
+
 #define FIRMWARE_ROLE "room_server"
 
-#define PACKET_LOG_FILE  "/packet_log"
-#define POSTS_FILE       "/posts"
+#define PACKET_LOG_FILE     "/packet_log"
+#define POSTS_FILE          "/posts"
+#define CHANNEL_CONFIG_FILE "/channel_cfg"
 
-#define MAX_POST_TEXT_LEN    (160-9)
+#define MAX_POST_TEXT_LEN    140  // User message limit (prefix added on top)
+#define CHANNEL_KEY_LEN 16 // Channel key byte length (only used for private mode channels)
+// Bulletin severity prefixes
+#define SEVERITY_PREFIX_INFO     "BLTN-INFO: "
+#define SEVERITY_PREFIX_WARNING  "BLTN-WARN: "
+#define SEVERITY_PREFIX_CRITICAL "BLTN-CRIT: "
+#define SEVERITY_PREFIX_LEN      11  // Length of severity prefix (all are 11 chars)
 
 struct PostInfo {
   mesh::Identity author;
   uint32_t post_timestamp;   // by OUR clock
-  char text[MAX_POST_TEXT_LEN+1];
+  char text[MAX_POST_TEXT_LEN+12];  // +12 for "BLTN-CRIT: " prefix (11 chars + null)
+};
+
+// Bulletin severity levels
+enum PostSeverity {
+  SEVERITY_INFO = 0,
+  SEVERITY_WARNING = 1,
+  SEVERITY_CRITICAL = 2
+};
+
+// Login history entry (runtime only)
+struct LoginHistoryEntry {
+  uint8_t pub_key[4];        // First 4 bytes of user's public key
+  uint32_t timestamp;        // Login timestamp (by our clock)
+  uint8_t permissions;       // User permissions at login
+};
+
+// Broadcast channel configuration (persistent)
+struct BulletinChannelConfig {
+  bool mode_private;         // false=public, true=private (default: false)
+  uint8_t secret[CHANNEL_KEY_LEN];        // Private channel key (only used if mode_private==true)
+  uint32_t guard;            // 0xDEADBEEF validation marker
 };
 
 // Network time synchronisation configuration (persistent)
@@ -138,13 +171,30 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t repeater_count;             // Number of valid adverts in buffer
   bool check_netsync_flag;            // Flag to trigger sync check on next loop
 
+  // Bulletin rate limiting
+  uint32_t last_bulletin_time;        // Last bulletin post time for rate limiting
+
+  // External app request tracking
+  unsigned long pending_app_request_times[MAX_CLIENTS];  // millis() when !app request was sent (0 = none pending)
+
+  // Login history tracking (last 5 logins, circular buffer)
+  LoginHistoryEntry login_history[5];
+  uint8_t login_history_count;       // Number of entries (0-5)
+  uint8_t login_history_next_idx;    // Next write position
+
+  // Broadcast channel state
+  BulletinChannelConfig channel_config;  // Persistent configuration
+  mesh::GroupChannel bulletin_channel;   // Runtime channel (hash + secret)
+  bool channel_initialised;              // True once channel is loaded/initialised
+
   void addPost(ClientInfo* client, const char* postData);
   void pushPostToClient(ClientInfo* client, PostInfo& post);
   uint8_t getUnsyncedCount(ClientInfo* client);
+  bool handleUserCommand(ClientInfo* client, mesh::Packet* packet, const char* command, char* reply);
+  void trackLogin(const uint8_t* pub_key, uint8_t permissions, uint32_t timestamp);
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
   File openAppend(const char* fname);
-  File openFileForWrite(const char* filename);  // Platform-specific file open for writing
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   void savePosts();
   void loadPosts();
@@ -156,6 +206,20 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void saveNetSyncConfig();
   void checkNetworkTimeSync();
   void notifyClockSyncedFromRepeaters();
+
+  // Broadcast channel management
+  void loadChannelConfig();
+  void saveChannelConfig();
+  void initialiseChannel();
+  void setChannelModePublic();
+  void setChannelModePrivate();
+  void broadcastBulletin(const char* bulletinText, PostSeverity severity);
+
+  // JSON serial output helpers
+  void printJSONSerialLog(const char* component, const char* action, const char* type,
+                          const char* severity, const char* text,
+                          const uint8_t* user_pubkey, const char* source,
+                          uint32_t timestamp);
 
 protected:
   float getAirtimeBudgetFactor() const override {
@@ -206,6 +270,9 @@ public:
   ClientACL* getACL() { return &acl; }
   uint16_t getNumPosted() const { return _num_posted; }
 
+  // Platform-specific file open for writing (used by SystemMessageQueue)
+  static File openFileForWrite(FILESYSTEM* fs, const char* filename);
+
   void savePrefs() override {
     _cli.savePrefs(_fs);
   }
@@ -229,14 +296,18 @@ public:
     strcpy(reply, "not supported");
   }
 
+  void formatStatsReply(char *reply) override;
+  void formatRadioStatsReply(char *reply) override;
+  void formatPacketStatsReply(char *reply) override;
+
   mesh::LocalIdentity& getSelfId() override { return self_id; }
 
   static bool saveFilter(ClientInfo* client);
 
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
-  void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
-  void addBulletin(const char* bulletinText);  // Server-generated bulletin (serial/UI)
+  void handleCommand(uint32_t sender_timestamp, char* command, char* reply, ClientInfo* client = NULL);
+  void addBulletin(const char* bulletinText, PostSeverity severity);  // Server-generated bulletin (serial/UI)
   void notifyUIOfLoadedPosts();  // Push loaded posts to UI after boot
   int getRecentPosts(const PostInfo** dest, int max_posts) const;  // Get latest N posts for display
   bool isDesynced() const;  // Check if RTC clock is desynced (year < 2025)

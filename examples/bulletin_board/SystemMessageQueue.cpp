@@ -1,16 +1,6 @@
 #include "SystemMessageQueue.h"
+#include "MyMesh.h"
 #include <helpers/TxtDataHelpers.h>
-
-static File openWrite(FILESYSTEM* _fs, const char* filename) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  _fs->remove(filename);
-  return _fs->open(filename, FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-  return _fs->open(filename, "w");
-#else
-  return _fs->open(filename, "w", true);
-#endif
-}
 
 void SystemMessageQueue::load(FILESYSTEM* fs) {
   num_messages = 0;
@@ -39,7 +29,7 @@ void SystemMessageQueue::load(FILESYSTEM* fs) {
 }
 
 void SystemMessageQueue::save(FILESYSTEM* fs) {
-  File file = openWrite(fs, "/system_msgs");
+  File file = MyMesh::openFileForWrite(fs, "/system_msgs");
   if (file) {
     file.write((uint8_t*)&num_messages, 1);
 

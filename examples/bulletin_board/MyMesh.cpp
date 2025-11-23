@@ -29,6 +29,10 @@ extern UITask ui_task;
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
+// Reply buffer sizes (from uint8_t temp[166])
+#define MAX_USER_REPLY_SIZE  157  // temp[9..165] for user commands
+#define MAX_CLI_REPLY_SIZE   161  // temp[5..165] for CLI commands
+
 struct ServerStats {
   uint16_t batt_milli_volts;
   uint16_t curr_tx_queue_len;
@@ -51,30 +55,71 @@ void MyMesh::addPost(ClientInfo *client, const char *postData) {
   posts[next_post_idx].author = client->id; // add to cyclic queue
   StrHelper::strncpy(posts[next_post_idx].text, postData, MAX_POST_TEXT_LEN);
 
-  posts[next_post_idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  posts[next_post_idx].post_timestamp = timestamp;
   next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
 
   next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   _num_posted++; // stats
+
+  // JSON output for message post
+  printJSONSerialLog("post", "create", "message", NULL, postData,
+                     client->id.pub_key, "mesh", timestamp);
 
   // Save posts to flash
   savePosts();
 }
 
-void MyMesh::addBulletin(const char* bulletinText) {
-  // Length validation - abort if too long
+void MyMesh::addBulletin(const char* bulletinText, PostSeverity severity) {
+  // Length validation - abort if too long (before adding prefix)
   if (strlen(bulletinText) > MAX_POST_TEXT_LEN) {
     return; // Abort - don't post anything
   }
 
   posts[next_post_idx].author = self_id;  // Use server's identity
-  StrHelper::strncpy(posts[next_post_idx].text, bulletinText, MAX_POST_TEXT_LEN);
 
-  posts[next_post_idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  // Add severity prefix
+  const char* prefix;
+  const char* sev_str;
+  switch (severity) {
+    case SEVERITY_INFO:
+      prefix = SEVERITY_PREFIX_INFO;
+      sev_str = "info";
+      break;
+    case SEVERITY_WARNING:
+      prefix = SEVERITY_PREFIX_WARNING;
+      sev_str = "warning";
+      break;
+    case SEVERITY_CRITICAL:
+      prefix = SEVERITY_PREFIX_CRITICAL;
+      sev_str = "critical";
+      break;
+    default:
+      prefix = SEVERITY_PREFIX_INFO;
+      sev_str = "info";
+      break;
+  }
+
+  // Construct prefixed message
+  char prefixed_text[MAX_POST_TEXT_LEN + SEVERITY_PREFIX_LEN + 1];  // +1 for null terminator
+  sprintf(prefixed_text, "%s%s", prefix, bulletinText);
+  StrHelper::strncpy(posts[next_post_idx].text, prefixed_text, MAX_POST_TEXT_LEN + SEVERITY_PREFIX_LEN);
+
+  uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  posts[next_post_idx].post_timestamp = timestamp;
   next_post_idx = (next_post_idx + 1) % MAX_UNSYNCED_POSTS;
 
   next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   _num_posted++; // stats
+
+  // JSON output for bulletin (source is "console" - no user_pubkey)
+  printJSONSerialLog("post", "create", "bulletin", sev_str, bulletinText,
+                     NULL, "console", timestamp);
+
+  // Broadcast warning and critical bulletins to channel
+  if (severity == SEVERITY_WARNING || severity == SEVERITY_CRITICAL) {
+    broadcastBulletin(bulletinText, severity);
+  }
 
   // Save posts to flash
   savePosts();
@@ -185,21 +230,19 @@ File MyMesh::openAppend(const char *fname) {
 #endif
 }
 
-File MyMesh::openFileForWrite(const char *filename) {
+File MyMesh::openFileForWrite(FILESYSTEM* fs, const char *filename) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  _fs->remove(filename);  // Delete before write on NRF52/STM32
-  return _fs->open(filename, FILE_O_WRITE);
+  fs->remove(filename);  // Delete before write on NRF52/STM32
+  return fs->open(filename, FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
-  return _fs->open(filename, "w");
+  return fs->open(filename, "w");
 #else
-  return _fs->open(filename, "w", true);
+  return fs->open(filename, "w", true);
 #endif
 }
 
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload,
                           size_t payload_len) {
-  // uint32_t now = getRTCClock()->getCurrentTimeUnique();
-  // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
 
   if (payload[0] == REQ_TYPE_GET_STATUS) {
@@ -384,6 +427,9 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
           getRTCClock()->setCurrentTime(sender_timestamp);
           notifyClockSynced(sender.pub_key);
 
+          // Schedule immediate post sync check to push any pending posts
+          next_push = 0;
+
           // Clear repeater buffer - admin sync takes precedence
           repeater_count = 0;
           check_netsync_flag = false;
@@ -420,6 +466,9 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
                     (uint32_t)client->id.pub_key[2],
                     (uint32_t)client->id.pub_key[3],
                     role);
+
+      // Track login in history
+      trackLogin(client->id.pub_key, perm, client->last_activity);
 
       // Reset pre-login attempts for all system messages when admin logs in
       // (they're now active, so normal delivery tracking applies)
@@ -490,6 +539,177 @@ void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
   }
 }
 
+bool MyMesh::handleUserCommand(ClientInfo* client, mesh::Packet* packet, const char* command, char* reply) {
+  // Check if this is a user command (starts with '!')
+  if (command[0] != '!') {
+    return false;  // Not a user command
+  }
+
+  const char* cmd = &command[1];  // Skip '!' prefix
+  uint32_t timestamp = getRTCClock()->getCurrentTime();
+
+  // Log request
+  printJSONSerialLog("app", "request", "command", NULL, cmd,
+                     client->id.pub_key, "mesh", timestamp);
+
+  // Handle specific commands
+  if (strcmp(cmd, "help") == 0) {
+    strcpy(reply, "Commands:\n!help [cmd]\n!version\n!channel\n!channelkey\n!rxp\n!txp\n!app <app_name> <command>");
+  } else if (strncmp(cmd, "help ", 5) == 0) {
+    // Per-command help
+    const char* help_cmd = &cmd[5];
+    if (strcmp(help_cmd, "version") == 0) {
+      strcpy(reply, "!version: Display firmware and MeshCore version info");
+    } else if (strcmp(help_cmd, "channel") == 0) {
+      strcpy(reply, "!channel: Display current broadcast channel mode (public/private)");
+    } else if (strcmp(help_cmd, "channelkey") == 0) {
+      strcpy(reply, "!channelkey: Display the channel encryption key (hex)");
+    } else if (strcmp(help_cmd, "rxp") == 0) {
+      strcpy(reply, "!rxp: Display the receive path (route from you to server)");
+    } else if (strcmp(help_cmd, "txp") == 0) {
+      strcpy(reply, "!txp: Display the transmit path (route from server to you)");
+    } else if (strcmp(help_cmd, "app") == 0) {
+      strcpy(reply, "!app <app_name> <command>: Send command to external application");
+    } else {
+      strcpy(reply, "Unknown command. Type !help for list.");
+    }
+  } else if (strcmp(cmd, "version") == 0) {
+    sprintf(reply, "Firmware: %s (%s)\nMeshCore: %s\nRole: %s",
+            FIRMWARE_VERSION, FIRMWARE_BUILD_DATE, MESHCORE_VERSION, FIRMWARE_ROLE);
+  } else if (strcmp(cmd, "channel") == 0) {
+    if (channel_config.mode_private) {
+      strcpy(reply, "Mode: private\nUse !channelkey to print key.");
+    } else {
+      strcpy(reply, "Mode: public\nChannel is using server's public key. Use !channelkey to print key.");
+    }
+  } else if (strcmp(cmd, "channelkey") == 0) {
+    char* pos = reply;
+    int remaining = MAX_USER_REPLY_SIZE;
+    if (channel_config.mode_private) {
+      //Channel mode is private - return secret key from config
+      for (int i = 0; i < CHANNEL_KEY_LEN && remaining > 3; i++) {
+        snprintf(pos, remaining, "%02X", channel_config.secret[i]);
+        pos += 2;
+        remaining -= 2;
+      }
+      *pos = 0;
+    } else {
+      //Channel mode is public - print node public key
+      for (int i = 0; i < CHANNEL_KEY_LEN && remaining > 3; i++) {
+        snprintf(pos, remaining, "%02X", the_mesh.self_id.pub_key[i]);
+        pos += 2;
+        remaining -= 2;
+      }
+      *pos = 0;
+    }
+  } else if (strcmp(cmd, "rxp") == 0) {
+    // Show RX routing info
+    if (packet->isRouteFlood()) {
+      sprintf(reply, "RX Path: FLOOD (path_len=%d)", packet->path_len);
+      if (packet->path_len > 0) {
+        char* pos = reply + strlen(reply);
+        strcpy(pos, " [");
+        pos += 2;
+        for (int i = 0; i < packet->path_len && i < 6; i++) {
+          sprintf(pos, "%02X", packet->path[i]);
+          pos += 2;
+          if (i < packet->path_len - 1) *pos++ = ' ';
+        }
+        *pos++ = ']';
+        *pos = 0;
+      }
+    } else {
+      // DIRECT routing - check if zero-hop or consumed path
+      if (packet->path_len == 0) {
+        strcpy(reply, "RX Path: DIRECT (zero-hop)");
+      } else {
+        strcpy(reply, "RX Path: DIRECT (consumed)");
+      }
+    }
+  } else if (strcmp(cmd, "txp") == 0) {
+    // Show TX path (out_path)
+    if (client->out_path_len < 0) {
+      strcpy(reply, "TX Path: FLOOD (path unknown)");
+    } else if (client->out_path_len == 0) {
+      strcpy(reply, "TX Path: DIRECT (zero-hop)");
+    } else {
+      sprintf(reply, "TX Path: DIRECT [");
+      char* pos = reply + strlen(reply);
+      for (int i = 0; i < client->out_path_len && i < 6; i++) {
+        sprintf(pos, "%02X", client->out_path[i]);
+        pos += 2;
+        if (i < client->out_path_len - 1) *pos++ = ' ';
+      }
+      *pos++ = ']';
+      *pos = 0;
+    }
+  } else if (strcmp(cmd, "app") == 0) {
+    // !app without parameters - show usage
+    strcpy(reply, "Usage: !app <app_name> <command>\nSends command to external application.");
+  } else if (strncmp(cmd, "app ", 4) == 0) {
+    // External application command - forward request to serial
+    const char* app_data = &cmd[4];
+
+    // Check if app_data is empty (just spaces)
+    while (*app_data == ' ') app_data++;
+    if (*app_data == 0) {
+      strcpy(reply, "Usage: !app <app_name> <command>");
+      return true;
+    }
+
+    // Parse app_name and command (split at first space)
+    const char* app_name = app_data;
+    const char* app_command = strchr(app_data, ' ');
+
+    if (app_command == NULL) {
+      strcpy(reply, "Usage: !app <app_name> <command>");
+      return true;
+    }
+
+    // Copy app_name into a temporary buffer
+    char app_name_buf[64];
+    int app_name_len = app_command - app_name;
+    if (app_name_len >= sizeof(app_name_buf)) app_name_len = sizeof(app_name_buf) - 1;
+    memcpy(app_name_buf, app_name, app_name_len);
+    app_name_buf[app_name_len] = 0;
+
+    // Skip spaces after app_name
+    app_command++;
+    while (*app_command == ' ') app_command++;
+    if (*app_command == 0) {
+      strcpy(reply, "Usage: !app <app_name> <command>");
+      return true;
+    }
+
+    // Output JSON request for external app
+    Serial.print("{\"component\":\"app\",\"action\":\"request\",\"data\":{\"app_name\":\"");
+    Serial.print(app_name_buf);
+    Serial.print("\",\"command\":\"");
+    Serial.print(app_command);
+    Serial.print("\"},\"meta\":{\"user_pubkey\":\"");
+    mesh::Utils::printHex(Serial, client->id.pub_key, PUB_KEY_SIZE);
+    Serial.print("\",\"source\":\"mesh\",\"timestamp\":");
+    Serial.print(timestamp);
+    Serial.println("}}");
+
+    // Mark pending app request
+    int client_idx = client - acl.getClientByIdx(0);
+    pending_app_request_times[client_idx] = millis();
+
+    // Send immediate "Processing..." response to user
+    strcpy(reply, "Processing request...");
+    return true;
+  } else {
+    strcpy(reply, "Unknown command. Type !help for list.");
+  }
+
+  // Log response
+  printJSONSerialLog("app", "response", "command", NULL, reply,
+                     client->id.pub_key, "system", timestamp);
+
+  return true;  // Was a user command
+}
+
 void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, const uint8_t *secret,
                             uint8_t *data, size_t len) {
   int i = matching_peer_indexes[sender_idx];
@@ -509,6 +729,9 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       if (sender_timestamp >= MIN_VALID_TIMESTAMP) {
         getRTCClock()->setCurrentTime(sender_timestamp);
         notifyClockSynced(client->id.pub_key);
+
+        // Schedule immediate post sync check to push any pending posts
+        next_push = 0;
 
         // Clear repeater buffer - admin sync takes precedence
         repeater_count = 0;
@@ -545,7 +768,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           if (is_retry) {
             temp[5] = 0; // no reply
           } else {
-            handleCommand(sender_timestamp, (char *)&data[5], (char *)&temp[5]);
+            handleCommand(sender_timestamp, (char *)&data[5], (char *)&temp[5], client);
             temp[4] = (TXT_TYPE_CLI_DATA << 2); // attempt and flags,  (NOTE: legacy was: TXT_TYPE_PLAIN)
           }
           send_ack = false;
@@ -558,17 +781,34 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           temp[5] = 0;      // no reply
           send_ack = false; // no ACK
         } else {
-          // Block posting if clock is desynced
-          if (isDesynced()) {
-            strcpy((char*)&temp[5], "Error: Server clock desynced");
-            temp[4] = (TXT_TYPE_CLI_DATA << 2); // Send error as CLI_DATA
-            send_ack = false; // No ACK for error
-          } else {
+          // Check if this is a user command (starts with '!')
+          const char* message = (const char*)&data[5];
+          if (message[0] == '!') {
+            // Handle user command
             if (!is_retry) {
-              addPost(client, (const char *)&data[5]);
+              handleUserCommand(client, packet, message, (char*)&temp[9]);
+              temp[4] = (TXT_TYPE_SIGNED_PLAIN << 2); // Send reply as TXT_TYPE_SIGNED_PLAIN with server identity
+              // Encode prefix of server's pub_key (matching system message format)
+              memcpy(&temp[5], self_id.pub_key, 4);
+            } else {
+              temp[9] = 0; // no reply on retry
             }
-            temp[5] = 0; // no reply (ACK is enough)
-            send_ack = true;
+            send_ack = true; // Send ACK so client knows command was received
+          } else {
+            // Block posting if clock is desynced
+            if (isDesynced()) {
+              strcpy((char*)&temp[9], "Error: Server clock desynced");
+              temp[4] = (TXT_TYPE_SIGNED_PLAIN << 2); // Send error as TXT_TYPE_SIGNED_PLAIN with server identity
+              // Encode prefix of server's pub_key (matching system message format)
+              memcpy(&temp[5], self_id.pub_key, 4);
+              send_ack = false; // No ACK for error
+            } else {
+              if (!is_retry) {
+                addPost(client, (const char *)&data[5]);
+              }
+              temp[9] = 0; // no reply (ACK is enough)
+              send_ack = true;
+            }
           }
         }
       }
@@ -595,7 +835,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         delay_millis = 0;
       }
 
-      int text_len = strlen((char *)&temp[5]);
+      int text_len = strlen((char *)&temp[9]);
       if (text_len > 0) {
         if (now == sender_timestamp) {
           // WORKAROUND: the two timestamps need to be different, in the CLI view
@@ -603,11 +843,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         }
         memcpy(temp, &now, 4); // mostly an extra blob to help make packet_hash unique
 
-        // calc expected ACK reply
-        // mesh::Utils::sha256((uint8_t *)&expected_ack_crc, 4, temp, 5 + text_len, self_id.pub_key,
-        // PUB_KEY_SIZE);
-
-        auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret, temp, 5 + text_len);
+        auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret, temp, 9 + text_len);
         if (reply) {
           if (client->out_path_len < 0) {
             sendFlood(reply, delay_millis + SERVER_RESPONSE_DELAY);
@@ -711,10 +947,24 @@ void MyMesh::onAckRecv(mesh::Packet *packet, uint32_t ack_crc) {
   }
 }
 
+void MyMesh::trackLogin(const uint8_t* pub_key, uint8_t permissions, uint32_t timestamp) {
+  // Add to circular buffer
+  auto& entry = login_history[login_history_next_idx];
+  memcpy(entry.pub_key, pub_key, 4);
+  entry.timestamp = timestamp;
+  entry.permissions = permissions;
+
+  // Update circular buffer indices
+  login_history_next_idx = (login_history_next_idx + 1) % 5;
+  if (login_history_count < 5) {
+    login_history_count++;
+  }
+}
+
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
-      _cli(board, rtc, &_prefs, this), telemetry(MAX_PACKET_PAYLOAD - 4) {
+      _cli(board, rtc, sensors, &_prefs, this), telemetry(MAX_PACKET_PAYLOAD - 4) {
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
   _logging = false;
@@ -727,10 +977,24 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   repeater_count = 0;
   check_netsync_flag = false;
   memset(&netsync_config, 0, sizeof(netsync_config));
+
+  // Bulletin rate limiting initialisation
+  last_bulletin_time = 0;
   memset(repeater_buffer, 0, sizeof(repeater_buffer));
   netsync_config.enabled = 0;         // Default: disabled (admin sync preferred)
   netsync_config.maxwait_mins = 15;   // Default: 15 minutes
   netsync_config.guard = 0xDEADBEEF;  // Validation marker
+
+  // Login history initialisation
+  memset(login_history, 0, sizeof(login_history));
+  login_history_count = 0;
+  login_history_next_idx = 0;
+  memset(pending_app_request_times, 0, sizeof(pending_app_request_times));
+
+  // Broadcast channel initialisation
+  memset(&channel_config, 0, sizeof(channel_config));
+  memset(&bulletin_channel, 0, sizeof(bulletin_channel));
+  channel_initialised = false;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -753,6 +1017,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.interference_threshold = 0; // disabled
 #ifdef ROOM_PASSWORD
   StrHelper::strncpy(_prefs.guest_password, ROOM_PASSWORD, sizeof(_prefs.guest_password));
+#else
+  StrHelper::strncpy(_prefs.guest_password, "hello", sizeof(_prefs.guest_password));
 #endif
 
   next_post_idx = 0;
@@ -783,7 +1049,7 @@ uint32_t MyMesh::loadBootCounter(FILESYSTEM* fs) {
 }
 
 void MyMesh::saveBootCounter(FILESYSTEM* fs, uint32_t count) {
-  File file = openFileForWrite("/boot_count");
+  File file = openFileForWrite(fs, "/boot_count");
 
   if (file) {
     file.write((uint8_t*)&count, 4);
@@ -853,12 +1119,187 @@ void MyMesh::loadNetSyncConfig() {
 }
 
 void MyMesh::saveNetSyncConfig() {
-  File f = openFileForWrite("/netsync_cfg");
+  File f = openFileForWrite(_fs, "/netsync_cfg");
   if (f) {
     f.write((uint8_t*)&netsync_config, sizeof(netsync_config));
     f.close();
     MESH_DEBUG_PRINTLN("Saved network time sync config");
   }
+}
+
+void MyMesh::loadChannelConfig() {
+  File f = _fs->open(CHANNEL_CONFIG_FILE, "r");
+  if (f) {
+    BulletinChannelConfig loaded_config;
+    size_t bytes_read = f.read((uint8_t*)&loaded_config, sizeof(loaded_config));
+    f.close();
+
+    // Validate and apply
+    if (bytes_read == sizeof(loaded_config) && loaded_config.guard == 0xDEADBEEF) {
+      channel_config = loaded_config;
+      MESH_DEBUG_PRINTLN("Loaded channel config: mode_private=%d", channel_config.mode_private);
+    } else {
+      MESH_DEBUG_PRINTLN("Invalid channel config, using defaults");
+      // Set defaults
+      channel_config.mode_private = false;  // Public mode by default
+      memset(channel_config.secret, 0, sizeof(channel_config.secret));
+      channel_config.guard = 0xDEADBEEF;
+      saveChannelConfig();  // Save defaults
+    }
+  } else {
+    MESH_DEBUG_PRINTLN("No channel config found, creating defaults");
+    // Set defaults
+    channel_config.mode_private = false;  // Public mode by default
+    memset(channel_config.secret, 0, sizeof(channel_config.secret));
+    channel_config.guard = 0xDEADBEEF;
+    saveChannelConfig();  // Save defaults
+  }
+}
+
+void MyMesh::saveChannelConfig() {
+  File f = openFileForWrite(_fs, CHANNEL_CONFIG_FILE);
+  if (f) {
+    f.write((uint8_t*)&channel_config, sizeof(channel_config));
+    f.close();
+    MESH_DEBUG_PRINTLN("Saved channel config");
+  }
+}
+
+void MyMesh::initialiseChannel() {
+  // Clear the runtime secret buffer
+  memset(bulletin_channel.secret, 0, sizeof(bulletin_channel.secret));
+  if (channel_config.mode_private) {
+    // Private mode: use stored secret
+    memcpy(bulletin_channel.secret, channel_config.secret, CHANNEL_KEY_LEN);
+  } else {
+    // Public mode: Derive secret from server's public key (first n bytes as defined in CHANNEL_KEY_LEN of self_id.pub_key)
+    memcpy(bulletin_channel.secret, self_id.pub_key, CHANNEL_KEY_LEN);
+  }
+
+  // Compute hash of secret (first byte only, as per GroupChannel structure)
+  uint8_t full_hash[32];
+  mesh::Utils::sha256(full_hash, 32, bulletin_channel.secret, CHANNEL_KEY_LEN);
+  bulletin_channel.hash[0] = full_hash[0];
+
+  channel_initialised = true;
+  MESH_DEBUG_PRINTLN("Initialised channel: mode=%s, hash[0]=0x%02X",
+                     channel_config.mode_private ? "private" : "public",
+                     bulletin_channel.hash[0]);
+}
+
+void MyMesh::setChannelModePublic() {
+  if (!channel_config.mode_private) {
+    return;  // Already in public mode
+  }
+
+  channel_config.mode_private = false;
+  memset(channel_config.secret, 0, sizeof(channel_config.secret));
+  saveChannelConfig();
+  initialiseChannel();
+
+  // Add system message
+  addSystemMessage("Channel mode changed to public");
+
+  // JSON output
+  printJSONSerialLog("channel", "config", "mode", NULL, "public",
+                     NULL, "console", getRTCClock()->getCurrentTime());
+}
+
+void MyMesh::setChannelModePrivate() {
+  if (channel_config.mode_private) {
+    return;  // Already in private mode
+  }
+
+  // Generate new random channel secret
+  getRNG()->random(channel_config.secret, CHANNEL_KEY_LEN);
+  channel_config.mode_private = true;
+  saveChannelConfig();
+  initialiseChannel();
+
+  // Add system message
+  addSystemMessage("Channel mode changed to private");
+
+  // JSON output - include secret in hex for admin to share
+  Serial.print("{\"component\":\"channel\",\"action\":\"config\",\"data\":{\"type\":\"mode\",\"mode\":\"private\",\"secret\":\"");
+  mesh::Utils::printHex(Serial, channel_config.secret, CHANNEL_KEY_LEN);
+  Serial.print("\"},\"meta\":{\"source\":\"console\",\"timestamp\":");
+  Serial.print(getRTCClock()->getCurrentTime());
+  Serial.println("}}");
+}
+
+void MyMesh::broadcastBulletin(const char* bulletinText, PostSeverity severity) {
+  if (!channel_initialised) {
+    MESH_DEBUG_PRINTLN("Cannot broadcast - channel not initialised");
+    return;
+  }
+
+  // Length check (bulletin text only, without prefix)
+  if (strlen(bulletinText) > MAX_POST_TEXT_LEN) {
+    MESH_DEBUG_PRINTLN("Bulletin too long to broadcast");
+    return;
+  }
+
+  // Determine severity prefix and string
+  const char* prefix;
+  const char* sev_str;
+  switch (severity) {
+    case SEVERITY_WARNING:
+      prefix = SEVERITY_PREFIX_WARNING;
+      sev_str = "warning";
+      break;
+    case SEVERITY_CRITICAL:
+      prefix = SEVERITY_PREFIX_CRITICAL;
+      sev_str = "critical";
+      break;
+    default:
+      // Should never happen, but default to critical
+      prefix = SEVERITY_PREFIX_CRITICAL;
+      sev_str = "critical";
+      break;
+  }
+
+  // Build the prefixed message
+  char prefixed_text[MAX_POST_TEXT_LEN + SEVERITY_PREFIX_LEN + 1];
+  sprintf(prefixed_text, "%s%s", prefix, bulletinText);
+
+  // Format payload with sender name prefix (matching companion_radio format)
+  uint8_t payload[MAX_PACKET_PAYLOAD];
+  int i = 0;
+
+  uint32_t timestamp = getRTCClock()->getCurrentTime();
+  memcpy(&payload[i], &timestamp, 4);  // [0-3]: timestamp
+  i += 4;
+
+  payload[i++] = 0;  // [4]: TXT_TYPE_PLAIN (channels only support PLAIN)
+
+  // [5+]: "<sender_name>: <prefixed_text>"
+  int name_len = strlen(_prefs.node_name);
+  if (i + name_len + 2 < MAX_PACKET_PAYLOAD) {  // +2 for ": "
+    memcpy(&payload[i], _prefs.node_name, name_len);
+    i += name_len;
+    payload[i++] = ':';
+    payload[i++] = ' ';
+  }
+
+  int text_len = strlen(prefixed_text);
+  if (i + text_len + 1 > MAX_PACKET_PAYLOAD) {
+    MESH_DEBUG_PRINTLN("broadcastBulletin: message too long (%d bytes), truncating", text_len);
+    text_len = MAX_PACKET_PAYLOAD - i - 1;  // Leave room for null terminator
+  }
+  memcpy(&payload[i], prefixed_text, text_len + 1);  // +1 for null terminator
+  i += text_len + 1;
+
+  // Send as group message on the bulletin channel
+  mesh::Packet* pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, bulletin_channel, payload, i);
+  if (pkt) {
+    sendFlood(pkt);
+  }
+
+  MESH_DEBUG_PRINTLN("Broadcast %s bulletin to channel", sev_str);
+
+  // JSON output
+  printJSONSerialLog("channel", "broadcast", "bulletin", sev_str, bulletinText,
+                     NULL, "console", timestamp);
 }
 
 void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp,
@@ -1034,13 +1475,15 @@ void MyMesh::checkNetworkTimeSync() {
   // Create system message with details
   notifyClockSyncedFromRepeaters();
 
+  // Schedule immediate post sync check to push any pending posts
+  next_push = 0;
+
   // Clear buffer
   repeater_count = 0;
 }
 
 void MyMesh::notifyClockSyncedFromRepeaters() {
   char msg[MAX_POST_TEXT_LEN + 1];
-  char temp[80];
 
   // Find most recent timestamp and its repeater
   int most_recent_idx = 0;
@@ -1056,7 +1499,7 @@ void MyMesh::notifyClockSyncedFromRepeaters() {
   DateTime dt(max_ts);
   const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-  sprintf(msg, "Clock set by Repeater advert from [%02X%02X%02X%02X] to %02d %s %04d %02d:%02d. Quorum nodes: ",
+  int len = snprintf(msg, sizeof(msg), "Clock set by Repeater advert from [%02X%02X%02X%02X] to %02d %s %04d %02d:%02d. Quorum nodes: ",
           repeater_buffer[most_recent_idx].pub_key[0],
           repeater_buffer[most_recent_idx].pub_key[1],
           repeater_buffer[most_recent_idx].pub_key[2],
@@ -1067,17 +1510,21 @@ void MyMesh::notifyClockSyncedFromRepeaters() {
           dt.hour(),
           dt.minute());
 
-  // Add all repeater IDs to quorum list
+  // Add all repeater IDs to quorum list with bounds checking
   for (int i = 0; i < repeater_count && i < 3; i++) {
-    sprintf(temp, "[%02X%02X%02X%02X]",
+    if (len >= (int)sizeof(msg) - 15) break;  // Reserve space for "[AABBCCDD], " (14 chars) + null
+    len += snprintf(msg + len, sizeof(msg) - len, "[%02X%02X%02X%02X]",
             repeater_buffer[i].pub_key[0],
             repeater_buffer[i].pub_key[1],
             repeater_buffer[i].pub_key[2],
             repeater_buffer[i].pub_key[3]);
-    strcat(msg, temp);
-    if (i < repeater_count - 1) strcat(msg, ", ");
+    if (i < repeater_count - 1 && len < (int)sizeof(msg) - 3) {
+      len += snprintf(msg + len, sizeof(msg) - len, ", ");
+    }
   }
-  strcat(msg, ".");
+  if (len < (int)sizeof(msg) - 1) {
+    snprintf(msg + len, sizeof(msg) - len, ".");
+  }
 
   addSystemMessage(msg);
 }
@@ -1107,6 +1554,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   // Load network time sync configuration
   loadNetSyncConfig();
+
+  // Load broadcast channel configuration
+  loadChannelConfig();
+  initialiseChannel();
 
   // Wait 5 seconds for Serial console to initialise before creating system messages
   MESH_DEBUG_PRINTLN("Waiting 5 seconds for Serial console initialisation...");
@@ -1210,13 +1661,98 @@ void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
   store.save("_main", self_id);
 }
 
+void MyMesh::formatStatsReply(char *reply) {
+  StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
+}
+
+void MyMesh::formatRadioStatsReply(char *reply) {
+  StatsFormatHelper::formatRadioStats(reply, _radio, radio_driver, getTotalAirTime(), getReceiveAirTime());
+}
+
+void MyMesh::formatPacketStatsReply(char *reply) {
+  StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(),
+                                       getNumRecvFlood(), getNumRecvDirect());
+}
+
 void MyMesh::clearStats() {
   radio_driver.resetStats();
   resetStats();
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 
-void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
+// JSON serial output helper - outputs structured log data
+void MyMesh::printJSONSerialLog(const char* component, const char* action, const char* type,
+                                 const char* severity, const char* text,
+                                 const uint8_t* user_pubkey, const char* source,
+                                 uint32_t timestamp) {
+  Serial.print("{\"component\":\"");
+  Serial.print(component);
+  Serial.print("\",\"action\":\"");
+  Serial.print(action);
+
+  // Data section
+  Serial.print("\",\"data\":{\"type\":\"");
+  Serial.print(type);
+  Serial.print("\"");
+
+  if (severity) {
+    Serial.print(",\"severity\":\"");
+    Serial.print(severity);
+    Serial.print("\"");
+  }
+
+  if (text) {
+    Serial.print(",\"text\":\"");
+    // TODO: Escape quotes in text for proper JSON
+    Serial.print(text);
+    Serial.print("\"");
+  }
+
+  Serial.print("}");
+
+  // Meta section
+  Serial.print(",\"meta\":{");
+
+  if (user_pubkey) {
+    Serial.print("\"user_pubkey\":\"");
+    mesh::Utils::printHex(Serial, user_pubkey, PUB_KEY_SIZE);
+    Serial.print("\"");
+
+    // Look up user role from ACL
+    ClientInfo* client = acl.getClient(user_pubkey, PUB_KEY_SIZE);
+    if (client) {
+      uint8_t role = client->permissions & PERM_ACL_ROLE_MASK;
+      Serial.print(",\"user_role\":\"");
+      switch (role) {
+        case PERM_ACL_ADMIN:      Serial.print("admin"); break;
+        case PERM_ACL_READ_WRITE: Serial.print("read_write"); break;
+        case PERM_ACL_READ_ONLY:  Serial.print("read_only"); break;
+        case PERM_ACL_GUEST:
+        default:                  Serial.print("guest"); break;
+      }
+      Serial.print("\"");
+    } else {
+      // Not in ACL - must be guest
+      Serial.print(",\"user_role\":\"guest\"");
+    }
+    Serial.print(",");
+  }
+
+  // Output source (auto-detect if NULL: mesh if user_pubkey, console otherwise)
+  Serial.print("\"source\":\"");
+  if (source) {
+    Serial.print(source);
+  } else {
+    Serial.print(user_pubkey ? "mesh" : "console");
+  }
+  Serial.print("\"");
+
+  Serial.print(",\"timestamp\":");
+  Serial.print(timestamp);
+  Serial.println("}}");
+}
+
+void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply, ClientInfo* client) {
   while (*command == ' ')
     command++; // skip leading spaces
 
@@ -1225,6 +1761,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     reply += 3;
     command += 3;
   }
+
+  // Track command source for reply formatting
+  // Note: Admin access via mesh is already enforced at protocol level (TXT_TYPE_CLI_DATA check)
+  bool is_serial = (sender_timestamp == 0);
 
   // handle ACL related commands
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
@@ -1249,7 +1789,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         strcpy(reply, "Err - bad pubkey");
       }
     }
-  } else if (sender_timestamp == 0 && strcmp(command, "get acl") == 0) {
+  } else if (strcmp(command, "get acl") == 0) {
     Serial.println("ACL:");
     for (int i = 0; i < acl.getNumClients(); i++) {
       auto c = acl.getClientByIdx(i);
@@ -1260,21 +1800,53 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
-  } else if (sender_timestamp == 0 && memcmp(command, "addbulletin ", 12) == 0) {
-    // Serial-only command (server admin can post bulletins)
+  } else if (memcmp(command, "bulletin.", 9) == 0) {
+    // Admin command (server admin can post bulletins via serial or over mesh)
     if (isDesynced()) {
-      strcpy(reply, "Error: Clock not synced");
+      strcpy(reply, "ERROR: Clock not synced");
     } else {
-      const char* bulletin_text = &command[12];
-      int text_len = strlen(bulletin_text);
+      // Parse severity (format: bulletin.<severity> <message>)
+      const char* cmd_after_dot = &command[9];
+      PostSeverity severity;
+      const char* message_start;
 
-      if (text_len == 0) {
-        strcpy(reply, "Error: Empty bulletin");
-      } else if (text_len > MAX_POST_TEXT_LEN) {
-        sprintf(reply, "Error: Max %d chars", MAX_POST_TEXT_LEN);
+      if (strncmp(cmd_after_dot, "info ", 5) == 0) {
+        severity = SEVERITY_INFO;
+        message_start = cmd_after_dot + 5;
+      } else if (strncmp(cmd_after_dot, "warning ", 8) == 0) {
+        severity = SEVERITY_WARNING;
+        message_start = cmd_after_dot + 8;
+      } else if (strncmp(cmd_after_dot, "critical ", 9) == 0) {
+        severity = SEVERITY_CRITICAL;
+        message_start = cmd_after_dot + 9;
       } else {
-        addBulletin(bulletin_text);
-        strcpy(reply, "Bulletin added");
+        strcpy(reply, "ERROR: Invalid severity. Use bulletin.info|bulletin.warning|bulletin.critical");
+        return;
+      }
+
+      int text_len = strlen(message_start);
+      if (text_len == 0) {
+        strcpy(reply, "ERROR: Empty bulletin");
+      } else if (text_len > MAX_POST_TEXT_LEN) {
+        sprintf(reply, "ERROR: Max %d chars", MAX_POST_TEXT_LEN);
+      } else {
+        // Check rate limit
+        if (last_bulletin_time > 0 && millis() - last_bulletin_time < BULLETIN_RATE_LIMIT_MILLIS) {
+          uint32_t remaining = (BULLETIN_RATE_LIMIT_MILLIS / 1000) - ((millis() - last_bulletin_time) / 1000);
+          sprintf(reply, "ERROR: Rate limit hit. Wait %u seconds.", remaining);
+        } else {
+          addBulletin(message_start, severity);
+          last_bulletin_time = millis();
+          // Send confirmation to admin
+          if (is_serial) {
+            reply[0] = '\0';  // No reply for serial (JSON already output)
+          } else {
+            // Send confirmation to admin over mesh
+            const char* sev_name = (severity == SEVERITY_INFO) ? "INFO" :
+                                   (severity == SEVERITY_WARNING) ? "WARNING" : "CRITICAL";
+            sprintf(reply, "OK - %s bulletin posted", sev_name);
+          }
+        }
       }
     }
   }
@@ -1313,6 +1885,134 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     } else {
       sprintf(reply, "Waiting for repeaters (%d/3)", repeater_count);
     }
+  }
+  // Broadcast channel CLI commands
+  else if (strcmp(command, "channel") == 0) {
+    // Display current channel mode
+    if (channel_config.mode_private) {
+      strcpy(reply, "Mode: private");
+    } else {
+      strcpy(reply, "Mode: public");
+    }
+  } else if (strcmp(command, "channel public") == 0) {
+    // Switch to public mode
+    setChannelModePublic();
+    strcpy(reply, "OK - Switched to public mode");
+  } else if (strcmp(command, "channel private") == 0) {
+    // Switch to private mode
+    setChannelModePrivate();
+    reply[0] = '\0';  // No plaintext reply (JSON already output with secret)
+  } else if (strcmp(command, "login.history") == 0) {
+    // Display last 5 logins (admin only)
+    if (login_history_count == 0) {
+      strcpy(reply, "No login history available");
+    } else {
+      // Build reply with last N logins (newest first)
+      reply[0] = '\0';
+      strcat(reply, "Last ");
+      char count_str[4];
+      sprintf(count_str, "%d", login_history_count);
+      strcat(reply, count_str);
+      strcat(reply, " logins:\n");
+
+      // Iterate backwards through circular buffer (newest first)
+      for (int i = 0; i < login_history_count; i++) {
+        int idx = (login_history_next_idx - 1 - i + 5) % 5;
+        auto& entry = login_history[idx];
+
+        // Format: [PUBKEY] ROLE - TIMESTAMP
+        char line[100];
+        const char* role = (entry.permissions == PERM_ACL_ADMIN) ? "admin" :
+                          (entry.permissions == PERM_ACL_READ_WRITE) ? "user" : "guest";
+
+        // Format timestamp using RTC
+        char timestamp_str[32];
+        DateTime dt(entry.timestamp);
+        sprintf(timestamp_str, "%02d/%02d/%04d %02d:%02d:%02d UTC",
+                dt.day(), dt.month(), dt.year(),
+                dt.hour(), dt.minute(), dt.second());
+
+        sprintf(line, "[%02X%02X%02X%02X] %s - %s\n",
+                entry.pub_key[0], entry.pub_key[1], entry.pub_key[2], entry.pub_key[3],
+                role, timestamp_str);
+        strcat(reply, line);
+      }
+    }
+  } else if (memcmp(command, "appreply ", 9) == 0) {
+    // External application reply - send response to user
+    // Format: appreply <app_name> <pubkey_hex> <response_text>
+    char* app_name = &command[9];
+    char* hex = strchr(app_name, ' ');   // look for first separator
+    if (hex == NULL) {
+      strcpy(reply, "ERROR: Bad format. Use: appreply <app_name> <pubkey_hex> <response_text>");
+    } else {
+      *hex++ = 0;   // null terminate app_name, hex now points to pubkey_hex
+
+      char* response_text = strchr(hex, ' ');   // look for second separator
+      if (response_text == NULL) {
+        strcpy(reply, "ERROR: Bad format. Use: appreply <app_name> <pubkey_hex> <response_text>");
+      } else {
+        *response_text++ = 0;   // null terminate hex, response_text now points to response
+
+        uint8_t pubkey[PUB_KEY_SIZE];
+        int hex_len = strlen(hex);
+        if (hex_len == PUB_KEY_SIZE * 2 && mesh::Utils::fromHex(pubkey, PUB_KEY_SIZE, hex)) {
+          // Find the client with this pubkey
+          ClientInfo* target_client = NULL;
+          int target_client_idx = -1;
+          for (int i = 0; i < acl.getNumClients(); i++) {
+            auto c = acl.getClientByIdx(i);
+            if (memcmp(c->id.pub_key, pubkey, PUB_KEY_SIZE) == 0) {
+              target_client = c;
+              target_client_idx = i;
+              break;
+            }
+          }
+
+          if (target_client) {
+            // Clear pending app request flag
+            pending_app_request_times[target_client_idx] = 0;
+
+            // Send response to user (matching user command reply format)
+            uint8_t temp[166];
+            uint32_t now = getRTCClock()->getCurrentTime();
+            memcpy(temp, &now, 4);  // timestamp
+            temp[4] = (TXT_TYPE_SIGNED_PLAIN << 2);  // Send as signed message
+            memcpy(&temp[5], self_id.pub_key, 4);    // Server identity prefix
+            strcpy((char*)&temp[9], response_text);
+
+            // Send reply
+            mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, target_client->id,
+                                               target_client->shared_secret,
+                                               temp, 9 + strlen((char*)&temp[9]) + 1);
+            if (pkt) {
+              if (target_client->out_path_len > 0) {
+                sendDirect(pkt, target_client->out_path, target_client->out_path_len, SERVER_RESPONSE_DELAY);
+              } else {
+                sendFlood(pkt, SERVER_RESPONSE_DELAY);
+              }
+            }
+
+            // Log to JSON (include app_name in the log)
+            Serial.print("{\"component\":\"app\",\"action\":\"response\",\"data\":{\"type\":\"data\",\"app_name\":\"");
+            Serial.print(app_name);
+            Serial.print("\",\"text\":\"");
+            Serial.print(response_text);
+            Serial.print("\"},\"meta\":{\"user_pubkey\":\"");
+            mesh::Utils::printHex(Serial, target_client->id.pub_key, PUB_KEY_SIZE);
+            Serial.print("\",\"source\":\"console\",\"timestamp\":");
+            Serial.print(getRTCClock()->getCurrentTime());
+            Serial.println("}}");
+
+            strcpy(reply, "OK - Response sent");
+          } else {
+            strcpy(reply, "ERROR: Client not found");
+          }
+        } else {
+          strcpy(reply, "ERROR: Invalid pubkey hex");
+        }
+      }
+    }
   } else {
     bool was_desynced = isDesynced();
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
@@ -1320,6 +2020,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     // If clock was desynced and now isn't, notify clock sync
     if (was_desynced && !isDesynced()) {
       notifyClockSynced(NULL);  // NULL = manual sync via CLI
+      // Schedule immediate post sync check to push any pending posts
+      next_push = 0;
     }
   }
 }
@@ -1351,6 +2053,36 @@ void MyMesh::loop() {
         }
 
         MESH_DEBUG_PRINTLN("pending ACK timed out: push_failures: %d", (uint32_t)c->extra.room.push_failures);
+      }
+
+      // Check for app request timeouts (10 seconds)
+      if (pending_app_request_times[i] != 0) {
+        unsigned long elapsed = millis() - pending_app_request_times[i];
+        if (elapsed >= 10000) {  // 10 second timeout
+          // Clear the pending flag
+          pending_app_request_times[i] = 0;
+
+          // Send timeout message to user (matching user command reply format)
+          uint8_t temp[166];
+          uint32_t now = getRTCClock()->getCurrentTime();
+          memcpy(temp, &now, 4);  // timestamp
+          temp[4] = (TXT_TYPE_SIGNED_PLAIN << 2);  // Send as signed message
+          memcpy(&temp[5], self_id.pub_key, 4);    // Server identity prefix
+          strcpy((char*)&temp[9], "Request timeout - no response from app");
+
+          mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, c->id,
+                                             c->shared_secret,
+                                             temp, 9 + strlen((char*)&temp[9]) + 1);
+          if (pkt) {
+            if (c->out_path_len > 0) {
+              sendDirect(pkt, c->out_path, c->out_path_len, SERVER_RESPONSE_DELAY);
+            } else {
+              sendFlood(pkt, SERVER_RESPONSE_DELAY);
+            }
+          }
+
+          MESH_DEBUG_PRINTLN("App request timeout for client %02X", (uint32_t)c->id.pub_key[0]);
+        }
       }
     }
     // check next Round-Robin client, and sync next new post
@@ -1522,7 +2254,7 @@ void MyMesh::savePosts() {
   if (!_fs) return;
 
   // Open file for writing
-  File f = openFileForWrite(POSTS_FILE);
+  File f = openFileForWrite(_fs, POSTS_FILE);
 
   if (!f) {
     MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file for writing");

@@ -22,7 +22,43 @@
   #define BATTERY_MAX_MILLIVOLTS 4200
 #endif
 
+#ifndef MAX_DISPLAY_MSGS
+  #define MAX_DISPLAY_MSGS 3  // Posts shown in UI
+#endif
+
 #include "icons.h"
+
+// Helper: Calculate battery percentage from millivolts
+static int getBatteryPercentage(uint16_t millivolts) {
+  int percentage = ((millivolts - BATTERY_MIN_MILLIVOLTS) * 100) /
+                   (BATTERY_MAX_MILLIVOLTS - BATTERY_MIN_MILLIVOLTS);
+  if (percentage < 0) percentage = 0;
+  if (percentage > 100) percentage = 100;
+  return percentage;
+}
+
+// Helper: Render battery indicator at top-right of display
+static void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
+  int batteryPercentage = getBatteryPercentage(batteryMilliVolts);
+
+  // Battery icon dimensions
+  const int iconWidth = 24;
+  const int iconHeight = 10;
+  const int iconX = display.width() - iconWidth - 5;
+  const int iconY = 0;
+
+  display.setColor(DisplayDriver::GREEN);
+
+  // Battery outline
+  display.drawRect(iconX, iconY, iconWidth, iconHeight);
+
+  // Battery "cap"
+  display.fillRect(iconX + iconWidth, iconY + (iconHeight / 4), 3, iconHeight / 2);
+
+  // Fill the battery based on percentage
+  int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
+  display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
+}
 
 class SplashScreen : public UIScreen {
   UITask* _task;
@@ -72,32 +108,6 @@ class StatusScreen : public UIScreen {
   NodePrefs* _node_prefs;
   mesh::RTCClock* _rtc;
   int _page_count;
-
-  void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
-    // Convert millivolts to percentage
-    const int minMilliVolts = BATTERY_MIN_MILLIVOLTS;
-    const int maxMilliVolts = BATTERY_MAX_MILLIVOLTS;
-    int batteryPercentage = ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
-    if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
-    if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
-
-    // battery icon
-    int iconWidth = 24;
-    int iconHeight = 10;
-    int iconX = display.width() - iconWidth - 5; // Position the icon near the top-right corner
-    int iconY = 0;
-    display.setColor(DisplayDriver::GREEN);
-
-    // battery outline
-    display.drawRect(iconX, iconY, iconWidth, iconHeight);
-
-    // battery "cap"
-    display.fillRect(iconX + iconWidth, iconY + (iconHeight / 4), 3, iconHeight / 2);
-
-    // fill the battery based on the percentage
-    int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
-    display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
-  }
 
 public:
   StatusScreen(UITask* task, NodePrefs* node_prefs, mesh::RTCClock* rtc)
@@ -207,32 +217,6 @@ class RadioConfigScreen : public UIScreen {
   NodePrefs* _node_prefs;
   int _page_count;
 
-  void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
-    // Convert millivolts to percentage
-    const int minMilliVolts = BATTERY_MIN_MILLIVOLTS;
-    const int maxMilliVolts = BATTERY_MAX_MILLIVOLTS;
-    int batteryPercentage = ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
-    if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
-    if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
-
-    // battery icon
-    int iconWidth = 24;
-    int iconHeight = 10;
-    int iconX = display.width() - iconWidth - 5; // Position the icon near the top-right corner
-    int iconY = 0;
-    display.setColor(DisplayDriver::GREEN);
-
-    // battery outline
-    display.drawRect(iconX, iconY, iconWidth, iconHeight);
-
-    // battery "cap"
-    display.fillRect(iconX + iconWidth, iconY + (iconHeight / 4), 3, iconHeight / 2);
-
-    // fill the battery based on the percentage
-    int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
-    display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
-  }
-
 public:
   RadioConfigScreen(UITask* task, NodePrefs* node_prefs)
      : _task(task), _node_prefs(node_prefs), _page_count(1) { }
@@ -309,7 +293,6 @@ class MsgPreviewScreen : public UIScreen {
   UITask* _task;
   mesh::RTCClock* _rtc;
 
-  #define MAX_DISPLAY_MSGS  3
   int curr_idx;  // Current message being viewed (0 = newest)
 
 public:
@@ -389,7 +372,16 @@ public:
     }
 
     display.setCursor(0, 16);
-    display.setColor(DisplayDriver::LIGHT);
+
+    // Set colour based on severity prefix
+    if (strncmp(p->text, SEVERITY_PREFIX_CRITICAL, SEVERITY_PREFIX_LEN - 1) == 0) {
+      display.setColor(DisplayDriver::RED);
+    } else if (strncmp(p->text, SEVERITY_PREFIX_WARNING, SEVERITY_PREFIX_LEN - 1) == 0) {
+      display.setColor(DisplayDriver::YELLOW);
+    } else {
+      display.setColor(DisplayDriver::LIGHT);  // Default for BLTN-INFO: and user posts
+    }
+
     char filtered_msg[MAX_POST_TEXT_LEN+1];
     display.translateUTF8ToBlocks(filtered_msg, p->text, sizeof(filtered_msg));
     display.printWordWrap(filtered_msg, display.width());
@@ -608,7 +600,7 @@ char UITask::handleLongPress(char c) {
   sprintf(alarm_msg, "ALARM at %02d:%02d - %d/%d/%d UTC",
           dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
 
-  the_mesh.addBulletin(alarm_msg);
+  the_mesh.addBulletin(alarm_msg, SEVERITY_WARNING);
   showAlert("Alarm posted!", 1000);
 
   c = 0;
