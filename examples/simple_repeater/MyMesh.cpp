@@ -1,6 +1,9 @@
 #include "MyMesh.h"
 #include <algorithm>
 
+// Power management flag (set to true if this firmware implements power management)
+extern bool power_mgmt_implemented;
+
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef LORA_FREQ
@@ -680,6 +683,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
 #endif
+
+  // Enable power management for this firmware (repeater implements power management)
+  power_mgmt_implemented = true;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));

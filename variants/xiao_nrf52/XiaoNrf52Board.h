@@ -2,6 +2,7 @@
 
 #include <MeshCore.h>
 #include <Arduino.h>
+#include "XiaoNrf52PowerMgt.h"
 
 #ifdef XIAO_NRF52
 
@@ -10,6 +11,7 @@ protected:
   uint8_t startup_reason;
 
 public:
+  PowerMgtState power_state;
   void begin();
   uint8_t getStartupReason() const override { return startup_reason; }
 
@@ -28,7 +30,7 @@ public:
 
     // We can't drive VBAT_ENABLE to HIGH as long
     // as we don't know wether we are charging or not ...
-    // this is a 3mA loss (4/1500)
+    // this is a ~2.6µA loss from 1M+512k divider
     digitalWrite(VBAT_ENABLE, LOW);
     int adcvalue = 0;
     analogReadResolution(12);
@@ -65,6 +67,14 @@ public:
   }
 
   bool startOTAUpdate(const char* id, char reply[]) override;
+
+  bool supportsPowerManagement() override {
+    return true;
+  }
+
+  bool isExternalPowered() override {
+    return XiaoNrf52PowerMgt::isExternalPowered();
+  }
 };
 
 #endif

@@ -5,6 +5,7 @@
 #include <bluefruit.h>
 
 #include "XiaoNrf52Board.h"
+#include "XiaoNrf52PowerMgt.h"
 
 static BLEDfu bledfu;
 
@@ -35,7 +36,18 @@ void XiaoNrf52Board::begin() {
 
   pinMode(PIN_VBAT, INPUT);
   pinMode(VBAT_ENABLE, OUTPUT);
-  digitalWrite(VBAT_ENABLE, HIGH);
+  // VBAT_ENABLE management moved to power management code
+  // variant.cpp initVariant() sets it LOW (safe default)
+
+  // Initialize power management state
+  power_state.state_current = PWRMGT_STATE_NORMAL;
+  power_state.state_last = PWRMGT_STATE_NORMAL;
+  power_state.state_current_timestamp = millis();
+  power_state.state_last_timestamp = millis();
+  power_state.state_scan_counter = 0;
+  power_state.state_scan_target = 0;
+
+  XiaoNrf52PowerMgt::initialize();
 
 #ifdef PIN_USER_BTN
   pinMode(PIN_USER_BTN, INPUT);

@@ -4,6 +4,9 @@
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
 
+// Power management flag (set by application firmware)
+extern bool power_mgmt_implemented;
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -71,7 +74,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
     file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier)); // 166
-    // 170
+    file.read((uint8_t *)&_prefs->pwrmgt_enabled, sizeof(_prefs->pwrmgt_enabled));                 // 170
+    // 171
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -95,6 +99,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
+
+    _prefs->pwrmgt_enabled = constrain(_prefs->pwrmgt_enabled, 0, 1);
 
     file.close();
   }
@@ -151,7 +157,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
     file.write((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
     file.write((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
-    // 170
+    file.write((uint8_t *)&_prefs->pwrmgt_enabled, sizeof(_prefs->pwrmgt_enabled));                 // 170
+    // 171
 
     file.close();
   }
@@ -340,6 +347,23 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           strcpy(reply, "Error: unsupported by this board");
         } else {
           sprintf(reply, "> %.3f", adc_mult);
+        }
+      } else if (memcmp(config, "pwrmgt.avail", 12) == 0) {
+        bool board_supports = _board->supportsPowerManagement();
+        bool available = board_supports && power_mgmt_implemented;
+        sprintf(reply, "> %s", available ? "available" : "not available");
+      } else if (memcmp(config, "pwrmgt.enabled", 14) == 0) {
+        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+          sprintf(reply, "Power management not available");
+        } else {
+          sprintf(reply, "> %s", _prefs->pwrmgt_enabled ? "on" : "off");
+        }
+      } else if (memcmp(config, "pwrmgt.source", 13) == 0) {
+        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+          sprintf(reply, "Power management not available");
+        } else {
+          bool external = _board->isExternalPowered();
+          sprintf(reply, "> %s", external ? "external" : "battery");
         }
       } else {
         sprintf(reply, "??: %s", config);
@@ -546,6 +570,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           _prefs->adc_multiplier = 0.0f;
           strcpy(reply, "Error: unsupported by this board");
         };
+      } else if (memcmp(config, "pwrmgt.enabled ", 15) == 0) {
+        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+          sprintf(reply, "ERROR: Power management not available on this board");
+        } else {
+          _prefs->pwrmgt_enabled = memcmp(&config[15], "on", 2) == 0;
+          savePrefs();
+          strcpy(reply, "OK");
+        }
       } else {
         sprintf(reply, "unknown config: %s", config);
       }
