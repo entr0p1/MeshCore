@@ -18,6 +18,9 @@ extern "C"
 {
 #endif // __cplusplus
 
+// Global reset reason (read in initVariant before SoftDevice clears it)
+extern uint32_t g_reset_reason;
+
 #define PINS_COUNT              (33)
 #define NUM_DIGITAL_PINS        (33)
 #define NUM_ANALOG_INPUTS       (8)

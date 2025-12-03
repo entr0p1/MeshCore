@@ -4,6 +4,10 @@
 #include "wiring_constants.h"
 #include "wiring_digital.h"
 
+// Global variable to store reset reason (read very early in boot)
+// Note: Must be initialized to 0xDEADBEEF to detect if initVariant() ran
+uint32_t g_reset_reason = 0xDEADBEEF;
+
 const uint32_t g_ADigitalPinMap[] = {
   // D0 .. D10
   2,  // D0  is P0.02 (A0)
@@ -56,13 +60,18 @@ const uint32_t g_ADigitalPinMap[] = {
 };
 
 void initVariant() {
+  // NOTE: g_reset_reason is captured in early_boot.cpp constructor before SystemInit()
+
+  // Clear RESETREAS for next boot
+  NRF_POWER->RESETREAS = 0xFFFFFFFF;
+
   // Disable reading of the BAT voltage.
   // https://wiki.seeedstudio.com/XIAO_BLE#q3-what-are-the-considerations-when-using-xiao-nrf52840-sense-for-battery-charging
   pinMode(VBAT_ENABLE, OUTPUT);
   // digitalWrite(VBAT_ENABLE, HIGH);
   //  This was taken from Seeed github butis not coherent with the doc,
   //  VBAT_ENABLE should be kept to LOW to protect P0.14, (1500/500)*(4.2-3.3)+3.3 = 3.9V > 3.6V
-  //  This induces a 3mA current in the resistors :( but it's better than burning the nrf
+  //  This induces a ~2.6µA current in the resistors but it's better than burning the nrf
   digitalWrite(VBAT_ENABLE, LOW);
 
   // Low charging current (50mA)

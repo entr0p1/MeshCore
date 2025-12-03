@@ -365,6 +365,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           bool external = _board->isExternalPowered();
           sprintf(reply, "> %s", external ? "external" : "battery");
         }
+      } else if (memcmp(config, "pwrmgt.bootreason", 17) == 0) {
+        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+          sprintf(reply, "Power management not available");
+        } else {
+          sprintf(reply, "> %s", _board->getResetReasonString());
+        }
       } else {
         sprintf(reply, "??: %s", config);
       }

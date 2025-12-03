@@ -6,6 +6,7 @@
 
 #include "XiaoNrf52Board.h"
 #include "XiaoNrf52PowerMgt.h"
+#include "variant.h"
 
 static BLEDfu bledfu;
 
@@ -23,7 +24,17 @@ static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 
 void XiaoNrf52Board::begin() {
   // for future use, sub-classes SHOULD call this from their begin()
-  startup_reason = BD_STARTUP_NORMAL;
+
+  // Use reset reason that was captured in initVariant() before SoftDevice cleared it
+  startup_reason = g_reset_reason;
+
+  // Debug: print the raw value and interpretation
+  Serial.begin(115200);
+  delay(100);
+  Serial.print("DEBUG: g_reset_reason = 0x");
+  Serial.print(g_reset_reason, HEX);
+  Serial.print(" - ");
+  Serial.println(XiaoNrf52PowerMgt::getResetReasonString(startup_reason));
 
   // Enable DC/DC converter for improved power efficiency
   uint8_t sd_enabled = 0;

@@ -8,12 +8,17 @@
 
 class XiaoNrf52Board : public mesh::MainBoard {
 protected:
-  uint8_t startup_reason;
+  uint32_t startup_reason;  // RESETREAS register value (captured in initVariant)
 
 public:
   PowerMgtState power_state;
   void begin();
-  uint8_t getStartupReason() const override { return startup_reason; }
+
+  uint8_t getStartupReason() const override {
+    return BD_STARTUP_NORMAL;  // Legacy interface, real reason in startup_reason
+  }
+
+  uint32_t getResetReason() const { return startup_reason; }
 
 #if defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
@@ -74,6 +79,10 @@ public:
 
   bool isExternalPowered() override {
     return XiaoNrf52PowerMgt::isExternalPowered();
+  }
+
+  const char* getResetReasonString() override {
+    return XiaoNrf52PowerMgt::getResetReasonString(startup_reason);
   }
 };
 

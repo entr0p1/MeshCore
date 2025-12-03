@@ -35,8 +35,9 @@ namespace XiaoNrf52PowerMgt {
   void transitionToState(PowerMgtState* state, uint8_t new_state);
   const char* getStateString(uint8_t state);
 
-  // Helper functions (Phase 1b)
+  // Helper functions
   bool isExternalPowered();  // Check if USB or 5V rail powered
+  const char* getResetReasonString(uint32_t reset_reason);  // Human-readable reset reason
 
   // Boot voltage check (Phase 2)
   bool checkBootVoltage(uint16_t threshold_mv);

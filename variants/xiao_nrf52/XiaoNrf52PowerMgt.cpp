@@ -39,11 +39,21 @@ namespace XiaoNrf52PowerMgt {
   }
 
   // Check if external power (USB or 5V rail) is present
-  // Phase 1b implementation
   bool isExternalPowered() {
     uint32_t usb_status;
     sd_power_usbregstatus_get(&usb_status);
     return (usb_status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  }
+
+  // Get human-readable reset reason string
+  const char* getResetReasonString(uint32_t reset_reason) {
+    if (reset_reason & POWER_RESETREAS_RESETPIN_Msk) return "Reset Pin";
+    if (reset_reason & POWER_RESETREAS_DOG_Msk) return "Watchdog";
+    if (reset_reason & POWER_RESETREAS_SREQ_Msk) return "Soft Reset";
+    if (reset_reason & POWER_RESETREAS_LOCKUP_Msk) return "CPU Lockup";
+    if (reset_reason & POWER_RESETREAS_OFF_Msk) return "Wake from SYSTEMOFF";
+    if (reset_reason & POWER_RESETREAS_DIF_Msk) return "Debug Interface";
+    return "Cold Boot";
   }
 
   // Check if battery voltage is sufficient for safe boot
