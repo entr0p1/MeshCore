@@ -4,8 +4,7 @@
 #include "wiring_constants.h"
 #include "wiring_digital.h"
 
-// Global variable to store reset reason (read very early in boot)
-// Note: Must be initialized to 0xDEADBEEF to detect if initVariant() ran
+// Global variable to store reset reason (captured in early_boot.cpp constructor)
 uint32_t g_reset_reason = 0xDEADBEEF;
 
 const uint32_t g_ADigitalPinMap[] = {
@@ -67,18 +66,13 @@ void initVariant() {
 
   // Disable reading of the BAT voltage.
   // https://wiki.seeedstudio.com/XIAO_BLE#q3-what-are-the-considerations-when-using-xiao-nrf52840-sense-for-battery-charging
+  // VBAT_ENABLE must be kept LOW to protect P0.14: (1500/500)*(4.2-3.3)+3.3 = 3.9V > 3.6V
+  // This induces a ~2.6µA current in the resistors but it's better than burning the nrf
   pinMode(VBAT_ENABLE, OUTPUT);
-  // digitalWrite(VBAT_ENABLE, HIGH);
-  //  This was taken from Seeed github butis not coherent with the doc,
-  //  VBAT_ENABLE should be kept to LOW to protect P0.14, (1500/500)*(4.2-3.3)+3.3 = 3.9V > 3.6V
-  //  This induces a ~2.6µA current in the resistors but it's better than burning the nrf
   digitalWrite(VBAT_ENABLE, LOW);
 
-  // Low charging current (50mA)
-  // https://wiki.seeedstudio.com/XIAO_BLE#battery-charging-current
-  // pinMode(PIN_CHARGING_CURRENT, INPUT);
-
   // High charging current (100mA)
+  // https://wiki.seeedstudio.com/XIAO_BLE#battery-charging-current
   pinMode(PIN_CHARGING_CURRENT, OUTPUT);
   digitalWrite(PIN_CHARGING_CURRENT, LOW);
 

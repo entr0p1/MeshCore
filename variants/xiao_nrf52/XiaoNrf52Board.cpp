@@ -5,8 +5,12 @@
 #include <bluefruit.h>
 
 #include "XiaoNrf52Board.h"
-#include "XiaoNrf52PowerMgt.h"
 #include "variant.h"
+
+// Boot voltage protection threshold (millivolts)
+// Conservative threshold provides headroom for voltage sag during TX
+// LiPo cells should stay above 3.0V; 2.8V idle allows for 200-300mV sag under load
+#define PWRMGT_BOOT_THRESHOLD_MV 2800
 
 static BLEDfu bledfu;
 
@@ -25,16 +29,58 @@ static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 void XiaoNrf52Board::begin() {
   // for future use, sub-classes SHOULD call this from their begin()
 
-  // Use reset reason that was captured in initVariant() before SoftDevice cleared it
+  // Use reset reason that was captured in early_boot.cpp constructor before SystemInit()
   startup_reason = g_reset_reason;
 
   // Debug: print the raw value and interpretation
   Serial.begin(115200);
-  delay(100);
-  Serial.print("DEBUG: g_reset_reason = 0x");
+  delay(1000); // Wait for serial console to init
+  Serial.print("INIT: g_reset_reason = 0x");
   Serial.print(g_reset_reason, HEX);
   Serial.print(" - ");
-  Serial.println(XiaoNrf52PowerMgt::getResetReasonString(startup_reason));
+  Serial.println(Nrf52PowerMgt::getResetReasonString(startup_reason));
+
+  // Configure battery voltage ADC pin and settings (one-time initialization)
+  pinMode(PIN_VBAT, INPUT);
+  // VBAT_ENABLE already configured in variant.cpp initVariant() (set LOW for safety)
+  analogReadResolution(12);
+  analogReference(AR_INTERNAL_3_0);
+  delay(50);  // Allow ADC to settle before first read
+
+  // CRITICAL: Boot voltage protection check
+  // Runs early (after Serial init) to protect battery from over-discharge
+  // Skip check only if externally powered (USB/5V rail detected)
+  // NOTE: SoftDevice not available yet, must read USB register directly
+  bool usb_connected = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  boot_voltage_mv = getBattMilliVolts();
+  if (!usb_connected) {
+    Serial.println("INIT: Power source = Battery");
+    // Only shutdown if reading is valid (>1000mV) AND below threshold
+    // This prevents spurious shutdowns on ADC glitches or uninitialized reads
+    if (boot_voltage_mv > 1000 && boot_voltage_mv < PWRMGT_BOOT_THRESHOLD_MV) {
+      Serial.print("INIT: CRITICAL: Battery voltage too low (");
+      Serial.print(boot_voltage_mv);
+      Serial.print(" mV < ");
+      Serial.print(PWRMGT_BOOT_THRESHOLD_MV);
+      Serial.println(" mV) - entering protective shutdown");
+      delay(100);
+      // Keep VBAT divider enabled for future LPCOMP wake (Phase 6)
+      pinMode(VBAT_ENABLE, OUTPUT);
+      digitalWrite(VBAT_ENABLE, LOW);
+      // Enter SYSTEMOFF mode (never returns)
+      Nrf52PowerMgt::enterSystemOff();
+    } else {
+      Serial.print("INIT: Battery voltage reading = ");
+      Serial.print(boot_voltage_mv);
+      Serial.println(" mV");
+    }
+  } else {
+    // USB/5V powered - still read voltage for informational purposes
+    Serial.println("INIT: Power source = External");
+    Serial.print("INIT: Voltage reading = ");
+    Serial.print(boot_voltage_mv);
+    Serial.println(" mV");
+  }
 
   // Enable DC/DC converter for improved power efficiency
   uint8_t sd_enabled = 0;
@@ -45,11 +91,6 @@ void XiaoNrf52Board::begin() {
     NRF_POWER->DCDCEN = 1;
   }
 
-  pinMode(PIN_VBAT, INPUT);
-  pinMode(VBAT_ENABLE, OUTPUT);
-  // VBAT_ENABLE management moved to power management code
-  // variant.cpp initVariant() sets it LOW (safe default)
-
   // Initialize power management state
   power_state.state_current = PWRMGT_STATE_NORMAL;
   power_state.state_last = PWRMGT_STATE_NORMAL;
@@ -58,7 +99,7 @@ void XiaoNrf52Board::begin() {
   power_state.state_scan_counter = 0;
   power_state.state_scan_target = 0;
 
-  XiaoNrf52PowerMgt::initialize();
+  Nrf52PowerMgt::initialize();
 
 #ifdef PIN_USER_BTN
   pinMode(PIN_USER_BTN, INPUT);
@@ -122,6 +163,11 @@ bool XiaoNrf52Board::startOTAUpdate(const char *id, char reply[]) {
   strcpy(reply, "OK - started");
 
   return true;
+}
+
+uint16_t XiaoNrf52Board::getBattMilliVolts() {
+  int adcvalue = analogRead(PIN_VBAT);
+  return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
 }
 
 #endif

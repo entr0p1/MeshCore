@@ -56,6 +56,7 @@ public:
   virtual bool supportsPowerManagement() { return false; }  // boards with power management override
   virtual bool isExternalPowered() { return false; }  // true if USB or external power present
   virtual const char* getResetReasonString() { return "Not available"; }  // human-readable reset reason
+  virtual uint16_t getBootVoltage() { return 0; }  // battery voltage at boot (millivolts)
 };
 
 /**

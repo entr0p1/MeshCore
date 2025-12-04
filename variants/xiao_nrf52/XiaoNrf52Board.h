@@ -2,13 +2,14 @@
 
 #include <MeshCore.h>
 #include <Arduino.h>
-#include "XiaoNrf52PowerMgt.h"
+#include <helpers/nrf52/Nrf52PowerMgt.h>
 
 #ifdef XIAO_NRF52
 
 class XiaoNrf52Board : public mesh::MainBoard {
 protected:
   uint32_t startup_reason;  // RESETREAS register value (captured in initVariant)
+  uint16_t boot_voltage_mv; // Battery voltage at boot (millivolts)
 
 public:
   PowerMgtState power_state;
@@ -20,6 +21,10 @@ public:
 
   uint32_t getResetReason() const { return startup_reason; }
 
+  uint16_t getBootVoltage() override {
+    return boot_voltage_mv;
+  }
+
 #if defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
@@ -29,21 +34,7 @@ public:
   }
 #endif
 
-  uint16_t getBattMilliVolts() override {
-    // Please read befor going further ;)
-    // https://wiki.seeedstudio.com/XIAO_BLE#q3-what-are-the-considerations-when-using-xiao-nrf52840-sense-for-battery-charging
-
-    // We can't drive VBAT_ENABLE to HIGH as long
-    // as we don't know wether we are charging or not ...
-    // this is a ~2.6µA loss from 1M+512k divider
-    digitalWrite(VBAT_ENABLE, LOW);
-    int adcvalue = 0;
-    analogReadResolution(12);
-    analogReference(AR_INTERNAL_3_0);
-    delay(10);
-    adcvalue = analogRead(PIN_VBAT);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
-  }
+  uint16_t getBattMilliVolts() override;
 
   const char* getManufacturerName() const override {
     return "Seeed Xiao-nrf52";
@@ -78,11 +69,11 @@ public:
   }
 
   bool isExternalPowered() override {
-    return XiaoNrf52PowerMgt::isExternalPowered();
+    return Nrf52PowerMgt::isExternalPowered();
   }
 
   const char* getResetReasonString() override {
-    return XiaoNrf52PowerMgt::getResetReasonString(startup_reason);
+    return Nrf52PowerMgt::getResetReasonString(startup_reason);
   }
 };
 

@@ -371,6 +371,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         } else {
           sprintf(reply, "> %s", _board->getResetReasonString());
         }
+      } else if (memcmp(config, "pwrmgt.bootmv", 13) == 0) {
+        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+          sprintf(reply, "Power management not available");
+        } else {
+          sprintf(reply, "> %u mV", _board->getBootVoltage());
+        }
       } else {
         sprintf(reply, "??: %s", config);
       }

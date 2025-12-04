@@ -1,18 +1,14 @@
-#include "XiaoNrf52PowerMgt.h"
-#include "variant.h"
+#include "Nrf52PowerMgt.h"
 #include <nrf_soc.h>
 
 // Global flag - set to true by application firmware that implements power management
 bool power_mgmt_implemented = false;
 
-namespace XiaoNrf52PowerMgt {
+namespace Nrf52PowerMgt {
 
   // Initialize power management
   void initialize() {
-    // Phase 1a: Minimal initialization
-    // Future phases will add:
-    // - POF configuration (Phase 5)
-    // - LPCOMP configuration (Phase 6)
+
   }
 
   // Transition to a new power management state
@@ -40,9 +36,19 @@ namespace XiaoNrf52PowerMgt {
 
   // Check if external power (USB or 5V rail) is present
   bool isExternalPowered() {
-    uint32_t usb_status;
-    sd_power_usbregstatus_get(&usb_status);
-    return (usb_status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+    // Check if SoftDevice is enabled before using its API
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+
+    if (sd_enabled) {
+      // Use SoftDevice API when available
+      uint32_t usb_status;
+      sd_power_usbregstatus_get(&usb_status);
+      return (usb_status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+    } else {
+      // SoftDevice not available, read register directly
+      return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+    }
   }
 
   // Get human-readable reset reason string
@@ -56,26 +62,15 @@ namespace XiaoNrf52PowerMgt {
     return "Cold Boot";
   }
 
-  // Check if battery voltage is sufficient for safe boot
-  // Phase 2 implementation - placeholder for now
-  bool checkBootVoltage(uint16_t threshold_mv) {
-    // Will be implemented in Phase 2
-    return true;  // Allow boot for now
-  }
-
   // Enter SYSTEMOFF mode (low power)
-  // Phase 2 basic implementation, Phase 6 adds LPCOMP wake
   void enterSystemOff() {
     Serial.println("Entering SYSTEMOFF mode");
     delay(100);  // Allow serial to flush
 
-    // Keep VBAT divider enabled for future LPCOMP wake (Phase 6)
-    pinMode(VBAT_ENABLE, OUTPUT);
-    digitalWrite(VBAT_ENABLE, LOW);
-
     // Enter SYSTEMOFF (never returns)
+    // Note: Variants with VBAT_ENABLE should configure it before calling this
     sd_power_system_off();
     while(1);  // Should never reach here
   }
 
-} // namespace XiaoNrf52PowerMgt
+} // namespace Nrf52PowerMgt

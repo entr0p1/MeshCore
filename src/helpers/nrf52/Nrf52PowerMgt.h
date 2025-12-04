@@ -1,5 +1,5 @@
-#ifndef XIAO_NRF52_POWER_MGT_H
-#define XIAO_NRF52_POWER_MGT_H
+#ifndef NRF52_POWER_MGT_H
+#define NRF52_POWER_MGT_H
 
 #include <Arduino.h>
 
@@ -26,8 +26,8 @@ struct PowerMgtState {
   uint8_t state_scan_target;          // Target state after scan
 };
 
-// Power management functions
-namespace XiaoNrf52PowerMgt {
+// Power management functions for nRF52840
+namespace Nrf52PowerMgt {
   // Initialize power management (called from board begin())
   void initialize();
 
@@ -38,10 +38,7 @@ namespace XiaoNrf52PowerMgt {
   // Helper functions
   bool isExternalPowered();  // Check if USB or 5V rail powered
   const char* getResetReasonString(uint32_t reset_reason);  // Human-readable reset reason
-
-  // Boot voltage check (Phase 2)
-  bool checkBootVoltage(uint16_t threshold_mv);
   void enterSystemOff();  // Enter SYSTEMOFF mode
 }
 
-#endif // XIAO_NRF52_POWER_MGT_H
+#endif // NRF52_POWER_MGT_H
