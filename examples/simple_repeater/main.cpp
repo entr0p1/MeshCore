@@ -1,12 +1,13 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
-
 #include "MyMesh.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
 #endif
+
+#include <helpers/PowerMgt.h>
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
@@ -111,10 +112,18 @@ void loop() {
     command[0] = 0;  // reset command buffer
   }
 
-  the_mesh.loop();
-  sensors.loop();
+  // Run normal processing unless board is in deep sleep cycle
+  if (!board.isInDeepSleep()) {
+    the_mesh.loop();
+    if (!PowerMgt::isInConserveMode()) {
+      sensors.loop();
+    }
 #ifdef DISPLAY_CLASS
-  ui_task.loop();
+    ui_task.loop();
 #endif
-  rtc_clock.tick();
+    rtc_clock.tick();
+  }
+
+  // Periodic board tasks (voltage monitoring, etc.)
+  board.loop();
 }

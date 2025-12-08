@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/PowerMgt.h>
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -273,6 +274,9 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
+  // Disable forwarding in power-conserving modes
+  if (PowerMgt::isInConserveMode()) return false;
+
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood() && packet->path_len >= _prefs.flood_max) return false;
   return true;
@@ -303,8 +307,18 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
         perm = PERM_ACL_ADMIN;
       } else {
         if (strcmp((char *)&data[8], _prefs.guest_password) == 0) {   // check the room/public password
+          // Reject guest logins in power-conserving modes
+          if (PowerMgt::isInConserveMode()) {
+            MESH_DEBUG_PRINTLN("Guest login rejected: low power mode");
+            return; // no response
+          }
           perm = PERM_ACL_READ_WRITE;
         } else if (_prefs.allow_read_only) {
+          // Reject unauthenticated access in power-conserving modes
+          if (PowerMgt::isInConserveMode()) {
+            MESH_DEBUG_PRINTLN("Read-only login rejected: low power mode");
+            return; // no response
+          }
           perm = PERM_ACL_GUEST;
         } else {
           MESH_DEBUG_PRINTLN("Incorrect room password");
@@ -646,6 +660,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   updateFloodAdvertTimer();
 
   board.setAdcMultiplier(_prefs.adc_multiplier);
+  PowerMgt::setRuntimeEnabled(_prefs.pwrmgt_enabled);
 
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
@@ -851,17 +866,22 @@ void MyMesh::loop() {
     }
   }
 
-  if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
-    mesh::Packet *pkt = createSelfAdvert();
-    if (pkt) sendFlood(pkt);
+  // Skip advertisements in power-conserving modes
+  if (PowerMgt::isInConserveMode()) {
+    // Don't send adverts, but keep timers running for when power improves
+  } else {
+    if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
+      mesh::Packet *pkt = createSelfAdvert();
+      if (pkt) sendFlood(pkt);
 
-    updateFloodAdvertTimer(); // schedule next flood advert
-    updateAdvertTimer();      // also schedule local advert (so they don't overlap)
-  } else if (next_local_advert && millisHasNowPassed(next_local_advert)) {
-    mesh::Packet *pkt = createSelfAdvert();
-    if (pkt) sendZeroHop(pkt);
+      updateFloodAdvertTimer(); // schedule next flood advert
+      updateAdvertTimer();      // also schedule local advert (so they don't overlap)
+    } else if (next_local_advert && millisHasNowPassed(next_local_advert)) {
+      mesh::Packet *pkt = createSelfAdvert();
+      if (pkt) sendZeroHop(pkt);
 
-    updateAdvertTimer(); // schedule next local advert
+      updateAdvertTimer(); // schedule next local advert
+    }
   }
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params

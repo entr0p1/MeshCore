@@ -1,4 +1,5 @@
 #include "SensorMesh.h"
+#include <helpers/PowerMgt.h>
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -301,6 +302,9 @@ float SensorMesh::getAirtimeBudgetFactor() const {
 }
 
 bool SensorMesh::allowPacketForward(const mesh::Packet* packet) {
+  // Disable forwarding in power-conserving modes
+  if (PowerMgt::isInConserveMode()) return false;
+
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood() && packet->path_len >= _prefs.flood_max) return false;
   return true;
@@ -744,7 +748,8 @@ void SensorMesh::begin(FILESYSTEM* fs) {
   updateAdvertTimer();
   updateFloodAdvertTimer();
 
-   board.setAdcMultiplier(_prefs.adc_multiplier);
+  board.setAdcMultiplier(_prefs.adc_multiplier);
+  PowerMgt::setRuntimeEnabled(_prefs.pwrmgt_enabled);
 
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
@@ -863,17 +868,22 @@ bool  SensorMesh::getGPS(uint8_t channel, float& lat, float& lon, float& alt) {
 void SensorMesh::loop() {
   mesh::Mesh::loop();
 
-  if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
-    mesh::Packet* pkt = createSelfAdvert();
-    if (pkt) sendFlood(pkt);
+  // Skip advertisements in power-conserving modes
+  if (PowerMgt::isInConserveMode()) {
+    // Don't send adverts, but keep timers running for when power improves
+  } else {
+    if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
+      mesh::Packet* pkt = createSelfAdvert();
+      if (pkt) sendFlood(pkt);
 
-    updateFloodAdvertTimer();   // schedule next flood advert
-    updateAdvertTimer();   // also schedule local advert (so they don't overlap)
-  } else if (next_local_advert && millisHasNowPassed(next_local_advert)) {
-    mesh::Packet* pkt = createSelfAdvert();
-    if (pkt) sendZeroHop(pkt);
+      updateFloodAdvertTimer();   // schedule next flood advert
+      updateAdvertTimer();   // also schedule local advert (so they don't overlap)
+    } else if (next_local_advert && millisHasNowPassed(next_local_advert)) {
+      mesh::Packet* pkt = createSelfAdvert();
+      if (pkt) sendZeroHop(pkt);
 
-    updateAdvertTimer();   // schedule next local advert
+      updateAdvertTimer();   // schedule next local advert
+    }
   }
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) {   // apply pending (temporary) radio params

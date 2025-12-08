@@ -61,6 +61,11 @@ public:
    */
   virtual void loop() { }
 
+  /**
+   * \brief  put radio into low-power sleep mode
+   */
+  virtual void powerOff() { }
+
   virtual int getNoiseFloor() const { return 0; }
 
   virtual void triggerNoiseFloorCalibrate(int threshold) { }

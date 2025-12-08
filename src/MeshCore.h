@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define MAX_HASH_SIZE        8
 #define PUB_KEY_SIZE        32
@@ -49,6 +50,7 @@ public:
   virtual void onAfterTransmit() { }
   virtual void reboot() = 0;
   virtual void powerOff() { /* no op */ }
+  virtual void loop() { /* no op */ }  // periodic board tasks (voltage monitoring, etc.)
   virtual uint32_t getGpio() { return 0; }
   virtual void setGpio(uint32_t values) {}
   virtual uint8_t getStartupReason() const = 0;
@@ -57,6 +59,17 @@ public:
   virtual bool isExternalPowered() { return false; }  // true if USB or external power present
   virtual const char* getResetReasonString() { return "Not available"; }  // human-readable reset reason
   virtual uint16_t getBootVoltage() { return 0; }  // battery voltage at boot (millivolts)
+  virtual void getPwrMgtCurrentStateInfo(char* buffer, size_t buflen) const {
+    if (buflen > 0) buffer[0] = 0;
+  }
+  virtual void getPwrMgtLastStateInfo(char* buffer, size_t buflen) const {
+    if (buflen > 0) buffer[0] = 0;
+  }
+  virtual bool setPwrMgtState(uint8_t state) { return false; }  // manually set power state (for debug/override)
+
+  // Returns true if board is in deep sleep cycle (RTC wake timer active)
+  // Call at start of main loop; if true, skip normal processing
+  virtual bool isInDeepSleep() { return false; }
 };
 
 /**

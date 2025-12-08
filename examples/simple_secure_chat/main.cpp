@@ -15,6 +15,7 @@
 #include <helpers/IdentityStore.h>
 #include <RTClib.h>
 #include <target.h>
+#include <helpers/PowerMgt.h>
 
 /* ---------------------------------- CONFIGURATION ------------------------------------- */
 
@@ -588,4 +589,7 @@ void setup() {
 void loop() {
   the_mesh.loop();
   rtc_clock.tick();
+
+  // Periodic board tasks (voltage monitoring, etc.)
+  board.loop();
 }

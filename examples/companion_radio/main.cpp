@@ -228,4 +228,7 @@ void loop() {
   ui_task.loop();
 #endif
   rtc_clock.tick();
+
+  // Periodic board tasks (voltage monitoring, etc.)
+  board.loop();
 }

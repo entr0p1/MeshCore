@@ -3,9 +3,7 @@
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
-
-// Power management flag (set by application firmware)
-extern bool power_mgmt_implemented;
+#include <helpers/PowerMgt.h>
 
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
@@ -349,33 +347,48 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           sprintf(reply, "> %.3f", adc_mult);
         }
       } else if (memcmp(config, "pwrmgt.avail", 12) == 0) {
-        bool board_supports = _board->supportsPowerManagement();
-        bool available = board_supports && power_mgmt_implemented;
+        bool available = _board->supportsPowerManagement() && PowerMgt::isAvailable();
         sprintf(reply, "> %s", available ? "available" : "not available");
       } else if (memcmp(config, "pwrmgt.enabled", 14) == 0) {
-        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
           sprintf(reply, "Power management not available");
         } else {
           sprintf(reply, "> %s", _prefs->pwrmgt_enabled ? "on" : "off");
         }
       } else if (memcmp(config, "pwrmgt.source", 13) == 0) {
-        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
           sprintf(reply, "Power management not available");
         } else {
           bool external = _board->isExternalPowered();
           sprintf(reply, "> %s", external ? "external" : "battery");
         }
       } else if (memcmp(config, "pwrmgt.bootreason", 17) == 0) {
-        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
           sprintf(reply, "Power management not available");
         } else {
           sprintf(reply, "> %s", _board->getResetReasonString());
         }
       } else if (memcmp(config, "pwrmgt.bootmv", 13) == 0) {
-        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
           sprintf(reply, "Power management not available");
         } else {
           sprintf(reply, "> %u mV", _board->getBootVoltage());
+        }
+      } else if (memcmp(config, "pwrmgt.state", 12) == 0) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
+          sprintf(reply, "Power management not available");
+        } else {
+          char state_info[128];
+          _board->getPwrMgtCurrentStateInfo(state_info, sizeof(state_info));
+          sprintf(reply, "> %s", state_info);
+        }
+      } else if (memcmp(config, "pwrmgt.laststate", 16) == 0) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
+          sprintf(reply, "Power management not available");
+        } else {
+          char state_info[128];
+          _board->getPwrMgtLastStateInfo(state_info, sizeof(state_info));
+          sprintf(reply, "> %s", state_info);
         }
       } else {
         sprintf(reply, "??: %s", config);
@@ -583,15 +596,60 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           strcpy(reply, "Error: unsupported by this board");
         };
       } else if (memcmp(config, "pwrmgt.enabled ", 15) == 0) {
-        if (!_board->supportsPowerManagement() || !power_mgmt_implemented) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
           sprintf(reply, "ERROR: Power management not available on this board");
         } else {
           _prefs->pwrmgt_enabled = memcmp(&config[15], "on", 2) == 0;
+          PowerMgt::setRuntimeEnabled(_prefs->pwrmgt_enabled);
           savePrefs();
           strcpy(reply, "OK");
         }
       } else {
         sprintf(reply, "unknown config: %s", config);
+      }
+    /*
+     * EXEC commands
+     */
+    } else if (memcmp(command, "exec ", 5) == 0) {
+      const char* action = &command[5];
+      if (memcmp(action, "pwrmgt.conserve", 15) == 0) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
+          sprintf(reply, "ERROR: Power management not available");
+        } else if (!_prefs->pwrmgt_enabled) {
+          sprintf(reply, "ERROR: Power management disabled");
+        } else {
+          if (_board->setPwrMgtState(1)) {  // PWRMGT_STATE_CONSERVE
+            strcpy(reply, "OK - Entering Conserve mode");
+          } else {
+            strcpy(reply, "ERROR: Failed to set state");
+          }
+        }
+      } else if (memcmp(action, "pwrmgt.sleep", 12) == 0) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
+          sprintf(reply, "ERROR: Power management not available");
+        } else if (!_prefs->pwrmgt_enabled) {
+          sprintf(reply, "ERROR: Power management disabled");
+        } else {
+          if (_board->setPwrMgtState(2)) {  // PWRMGT_STATE_SLEEP
+            strcpy(reply, "OK - Entering Sleep mode");
+          } else {
+            strcpy(reply, "ERROR: Failed to set state");
+          }
+        }
+      } else if (memcmp(action, "pwrmgt.shutdown", 15) == 0) {
+        if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
+          sprintf(reply, "ERROR: Power management not available");
+        } else if (!_prefs->pwrmgt_enabled) {
+          sprintf(reply, "ERROR: Power management disabled");
+        } else {
+          if (_board->setPwrMgtState(3)) {  // PWRMGT_STATE_SHUTDOWN
+            strcpy(reply, "OK - Entering Shutdown mode");
+          } else {
+            strcpy(reply, "ERROR: Failed to set state");
+          }
+        }
+      } else {
+        sprintf(reply, "unknown exec: %s", action);
       }
     } else if (sender_timestamp == 0 && strcmp(command, "erase") == 0) {
       bool s = _callbacks->formatFileSystem();

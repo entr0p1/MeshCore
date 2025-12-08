@@ -5,6 +5,8 @@
   static UITask ui_task(display);
 #endif
 
+#include <helpers/PowerMgt.h>
+
 class MyMesh : public SensorMesh {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
@@ -139,10 +141,18 @@ void loop() {
     command[0] = 0;  // reset command buffer
   }
 
-  the_mesh.loop();
-  sensors.loop();
+  // Run normal processing unless board is in deep sleep cycle
+  if (!board.isInDeepSleep()) {
+    the_mesh.loop();
+    if (!PowerMgt::isInConserveMode()) {
+      sensors.loop();
+    }
 #ifdef DISPLAY_CLASS
-  ui_task.loop();
+    ui_task.loop();
 #endif
-  rtc_clock.tick();
+    rtc_clock.tick();
+  }
+
+  // Always run voltage monitoring
+  board.loop();
 }
