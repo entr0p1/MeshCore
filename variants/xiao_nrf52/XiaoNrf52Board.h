@@ -9,7 +9,10 @@
 
 class XiaoNrf52Board : public NRF52BoardDCDC, public NRF52BoardOTA {
 protected:
+  static XiaoNrf52Board* s_activeInstance;
+
   uint32_t startup_reason;              // RESETREAS register value
+  uint8_t shutdown_reason;              // GPREGRET value (why device entered last SYSTEMOFF)
   uint16_t boot_voltage_mv;             // Battery voltage at boot (millivolts)
   unsigned long last_voltage_check_ms;  // Timestamp of last voltage monitoring check
   uint8_t led_power_state;              // Track LED state to avoid redundant updates
@@ -20,13 +23,20 @@ protected:
   // Visual scheme: Normal=off, Conserve=Yellow(R+G), Sleep=Blue, Shutdown=Red
   void setPowerStateLED(uint8_t state);
 
-  // Board-specific shutdown preparation (VBAT divider, peripherals)
+  // Board-specific shutdown preparation (VBAT divider, LPCOMP wake, peripherals)
   void prepareForBoardShutdown() {
-    // Keep VBAT divider enabled for future LPCOMP wake
+    // Keep VBAT divider enabled for LPCOMP monitoring during SYSTEMOFF
     pinMode(VBAT_ENABLE, OUTPUT);
     digitalWrite(VBAT_ENABLE, LOW);
-    // Future: GPS, sensors, SPI cleanup
+
+    // Configure LPCOMP for voltage recovery wake
+    Nrf52PowerMgt::configureLpcompWake(PWRMGT_LPCOMP_AIN, PWRMGT_LPCOMP_REF_EIGHTHS);
+
+    // FIXME: remove LED indicators before production to avoid wasting power
+    setPowerStateLED(PowerMgt::STATE_SHUTDOWN);
   }
+
+  static void handleVoltageShutdown();
 
 public:
   XiaoNrf52Board() : NRF52BoardOTA("XIAO_NRF52_OTA") {}
@@ -79,8 +89,7 @@ public:
 
     // Use standard shutdown sequence
     prepareForBoardShutdown();
-    Nrf52PowerMgt::prepareForShutdown();
-    Nrf52PowerMgt::enterSystemOff();
+    Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_USER);
   }
 
   bool supportsPowerManagement() override {
@@ -125,8 +134,7 @@ public:
     // Handle shutdown state - gracefully power off
     if (state == PowerMgt::STATE_SHUTDOWN) {
       prepareForBoardShutdown();
-      Nrf52PowerMgt::prepareForShutdown();
-      Nrf52PowerMgt::enterSystemOff();
+      Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_USER);
     }
 
     return true;

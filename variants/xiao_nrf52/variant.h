@@ -18,8 +18,9 @@ extern "C"
 {
 #endif // __cplusplus
 
-// Global reset reason (read in initVariant before SoftDevice clears it)
+// Global variables for power management
 extern uint32_t g_reset_reason;
+extern uint8_t g_shutdown_reason;
 
 #define PINS_COUNT              (33)
 #define NUM_DIGITAL_PINS        (33)
@@ -80,10 +81,14 @@ static const uint8_t D10 = 10;
 
 // Power management voltage thresholds (millivolts) - based on LiPo discharge curve
 // These are board-specific as different battery chemistries have different curves
-#define PWRMGT_BOOT_THRESHOLD_MV   2800   // Boot protection: won't boot below this (0 = disabled)
-#define PWRMGT_VOLTAGE_SHUTDOWN    3000   // Runtime: enter SYSTEMOFF below this
-#define PWRMGT_VOLTAGE_SLEEP       3300   // Runtime: enter Sleep mode below this
-#define PWRMGT_VOLTAGE_CONSERVE    3600   // Runtime: enter Conserve mode below this
+#define PWRMGT_VOLTAGE_CONSERVE    3500   // Runtime: enter Conserve mode below this
+#define PWRMGT_VOLTAGE_SLEEP       3200   // Runtime: enter Sleep mode below this
+#define PWRMGT_VOLTAGE_SHUTDOWN    2950   // Runtime: enter SYSTEMOFF below this
+#define PWRMGT_VOLTAGE_BOOTLOCK    3000   // Boot protection: won't boot below this (0 = disabled)
+
+// LPCOMP wake configuration (voltage recovery from SYSTEMOFF)
+#define PWRMGT_LPCOMP_AIN           7     // AIN7 = P0.31 = PIN_VBAT
+#define PWRMGT_LPCOMP_REF_EIGHTHS   4     // 5/8 VDD (~1.125V @ 1.8V VDD) -> ~3375mV wake threshold
 
 static const uint8_t A0  = PIN_A0;
 static const uint8_t A1  = PIN_A1;

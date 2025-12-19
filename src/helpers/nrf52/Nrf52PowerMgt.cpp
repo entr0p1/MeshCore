@@ -82,42 +82,36 @@ namespace Nrf52PowerMgt {
     return "Cold Boot";
   }
 
-  // Common nRF52 cleanup before shutdown
-  // Call this before enterSystemOff() to gracefully close resources
-  void prepareForShutdown() {
-    MESH_DEBUG_PRINTLN("PWRMGT: Preparing for shutdown...");
-
-    // Flush serial buffers before shutdown
-    Serial.flush();
-    delay(100);
-
-    // Close filesystem if available
-    // Note: Application must have already stopped writing to flash
-#if defined(ARDUINO_ARCH_NRF52)
-    #ifdef InternalFS
-      // InternalFS.end();  // Uncomment when Adafruit_InternalFS supports end()
-    #endif
-#endif
-
-    MESH_DEBUG_PRINTLN("PWRMGT: Shutdown preparation complete");
-    Serial.flush();
-    delay(50);
+  // Internal helper: set shutdown reason in GPREGRET
+  static void setShutdownReason(uint8_t reason) {
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+    if (sd_enabled) {
+      sd_power_gpregret_clr(0, 0xFF);
+      sd_power_gpregret_set(0, reason);
+    } else {
+      NRF_POWER->GPREGRET = reason;
+    }
   }
 
-  // Enter SYSTEMOFF mode (low power)
-  void enterSystemOff() {
-    MESH_DEBUG_PRINTLN("PWRMGT: Entering SYSTEMOFF mode");
+  // Clean up and enter SYSTEMOFF mode
+  void enterSystemOff(uint8_t reason) {
+    MESH_DEBUG_PRINTLN("PWRMGT: Entering SYSTEMOFF (%s)",
+      getShutdownReasonString(reason));
+
+    // Record shutdown reason in GPREGRET
+    setShutdownReason(reason);
+
+    // Flush serial buffers
     Serial.flush();
     delay(100);
 
     // Enter SYSTEMOFF
-    // Note: Variants with VBAT_ENABLE should configure it before calling this
     sd_power_system_off();
     while(1);  // Should never reach here
   }
 
   // Runtime voltage monitoring with debouncing and state transitions
-  // Call this periodically from board loop
   void monitorVoltage(PowerMgtState* state, uint16_t current_voltage_mv,
                       void (*onShutdown)()) {
     if (state == nullptr) {
@@ -178,11 +172,7 @@ namespace Nrf52PowerMgt {
               onShutdown();
             }
 
-            // Common nRF52 cleanup (flash, serial, etc.)
-            prepareForShutdown();
-
-            // Enter SYSTEMOFF mode
-            enterSystemOff();
+            enterSystemOff(SHUTDOWN_REASON_LOW_VOLTAGE);
           }
         }
       } else {
@@ -207,8 +197,6 @@ namespace Nrf52PowerMgt {
   }
 
   // Deep sleep with RTC synchronization and radio management
-  // Returns true if in SLEEP mode (load shedding active), false otherwise
-  // Handles radio power, RTC sync, and CPU halt automatically
   bool deepSleep(PowerMgtState* state, mesh::RTCClock& rtc, mesh::Radio& radio) {
     if (state == nullptr) {
       return false;
@@ -276,6 +264,54 @@ namespace Nrf52PowerMgt {
     }
 
     return true;  // Load shedding active, skip normal loop processing
+  }
+
+  // Get human-readable shutdown reason string
+  const char* getShutdownReasonString(uint8_t reason) {
+    switch (reason) {
+      case SHUTDOWN_REASON_LOW_VOLTAGE:  return "Low Voltage";
+      case SHUTDOWN_REASON_USER:         return "User Request";
+      case SHUTDOWN_REASON_BOOT_PROTECT: return "Boot Protection";
+      default:                           return "Unknown";
+    }
+  }
+
+  // Configure LPCOMP for voltage-based wake from SYSTEMOFF
+  void configureLpcompWake(uint8_t ain_channel, uint8_t vdd_fraction_eighths) {
+    // LPCOMP is not managed by SoftDevice - direct register access required
+
+    // Halt and disable before reconfiguration
+    NRF_LPCOMP->TASKS_STOP = 1;
+    NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Disabled;
+
+    // Select analog input (AIN0-7 maps to PSEL 0-7)
+    NRF_LPCOMP->PSEL = (ain_channel & LPCOMP_PSEL_PSEL_Msk);
+
+    // Reference: VDD fraction (0=1/8, 1=2/8, ..., 6=7/8)
+    // During SYSTEMOFF, VDD is ~1.8V (internal regulator from VDDH/battery)
+    NRF_LPCOMP->REFSEL = (vdd_fraction_eighths & LPCOMP_REFSEL_REFSEL_Msk);
+
+    // Detect UP events (voltage rises above threshold for battery recovery)
+    NRF_LPCOMP->ANADETECT = LPCOMP_ANADETECT_ANADETECT_Up;
+
+    // Enable 50mV hysteresis for noise immunity (~150mV effective on battery due to divider)
+    NRF_LPCOMP->HYST = LPCOMP_HYST_HYST_Hyst50mV;
+
+    // Ensure stale events/interrupts are cleared before enabling wake
+    NRF_LPCOMP->EVENTS_READY = 0;
+    NRF_LPCOMP->EVENTS_DOWN = 0;
+    NRF_LPCOMP->EVENTS_UP = 0;
+    NRF_LPCOMP->EVENTS_CROSS = 0;
+
+    NRF_LPCOMP->INTENCLR = 0xFFFFFFFF;
+    NRF_LPCOMP->INTENSET = LPCOMP_INTENSET_UP_Msk;
+
+    // Enable LPCOMP
+    NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Enabled;
+    NRF_LPCOMP->TASKS_START = 1;
+
+    MESH_DEBUG_PRINTLN("PWRMGT: LPCOMP wake configured (AIN%d, ref=%d/8 VDD)",
+                       ain_channel, vdd_fraction_eighths + 1);
   }
 
 } // namespace Nrf52PowerMgt

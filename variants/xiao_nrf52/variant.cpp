@@ -4,8 +4,9 @@
 #include "wiring_constants.h"
 #include "wiring_digital.h"
 
-// Global variable to store reset reason (captured in early_boot.cpp constructor)
+// Global variables for power management
 uint32_t g_reset_reason = 0xDEADBEEF;
+uint8_t g_shutdown_reason = 0;
 
 const uint32_t g_ADigitalPinMap[] = {
   // D0 .. D10
@@ -59,10 +60,9 @@ const uint32_t g_ADigitalPinMap[] = {
 };
 
 void initVariant() {
-  // NOTE: g_reset_reason is captured in early_boot.cpp constructor before SystemInit()
-
-  // Clear RESETREAS for next boot
+  // Clear RESETREAS and GPREGRET for next boot
   NRF_POWER->RESETREAS = 0xFFFFFFFF;
+  NRF_POWER->GPREGRET = 0;
 
   // Disable reading of the BAT voltage.
   // https://wiki.seeedstudio.com/XIAO_BLE#q3-what-are-the-considerations-when-using-xiao-nrf52840-sense-for-battery-charging

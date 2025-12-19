@@ -1,7 +1,6 @@
 #pragma once
 
 // nRF52-specific power management implementation.
-// Provides RTC-based sleep timer, external power detection, and shutdown handling.
 // Board variants call these functions; applications use the PowerMgt facade.
 
 #include <Arduino.h>
@@ -11,6 +10,12 @@
 // Scan/debounce constants
 #define PWRMGT_STATE_SCAN_DEBOUNCE 3  // Consecutive readings to trigger state change
 #define PWRMGT_STATE_SCAN_INTVL 5     // Minutes between voltage scans
+
+// Shutdown reason codes (stored in GPREGRET before SYSTEMOFF)
+#define SHUTDOWN_REASON_NONE          0x00
+#define SHUTDOWN_REASON_LOW_VOLTAGE   0x4C  // 'L' - Software low voltage threshold
+#define SHUTDOWN_REASON_USER          0x55  // 'U' - User requested powerOff()
+#define SHUTDOWN_REASON_BOOT_PROTECT  0x42  // 'B' - Boot voltage protection
 
 // Power management state structure
 struct PowerMgtState {
@@ -37,16 +42,21 @@ namespace Nrf52PowerMgt {
   bool isExternalPowered();  // Check if USB or 5V rail powered
   const char* getResetReasonString(uint32_t reset_reason);  // Human-readable reset reason
 
-  // Power state transitions
-  void prepareForShutdown();  // Common nRF52 cleanup before shutdown (flash, serial, etc.)
-  void enterSystemOff();  // Enter SYSTEMOFF mode (never returns)
+  // Enter SYSTEMOFF mode with cleanup
+  void enterSystemOff(uint8_t reason);
 
   // Runtime voltage monitoring - call periodically from board loop
   void monitorVoltage(PowerMgtState* state, uint16_t current_voltage_mv,
                       void (*onShutdown)() = nullptr);
 
   // Deep sleep with RTC synchronization and radio management
-  // Returns true if in SLEEP mode (load shedding active), false otherwise
-  // Handles radio power, RTC sync, and CPU halt automatically
   bool deepSleep(PowerMgtState* state, mesh::RTCClock& rtc, mesh::Radio& radio);
+
+  // Shutdown reason (GPREGRET) - human-readable string
+  const char* getShutdownReasonString(uint8_t reason);
+
+  // LPCOMP wake-from-SYSTEMOFF configuration
+  // Must be called before enterSystemOff() to enable voltage-based wake
+  // ain_channel: AIN0-7 (0-7), vdd_fraction_eighths: 0=1/8, 1=2/8, ..., 6=7/8
+  void configureLpcompWake(uint8_t ain_channel, uint8_t vdd_fraction_eighths);
 }

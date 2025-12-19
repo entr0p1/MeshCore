@@ -7,18 +7,36 @@
 #include "target.h"
 #include <helpers/PowerMgt.h>
 
+XiaoNrf52Board* XiaoNrf52Board::s_activeInstance = nullptr;
+
+void XiaoNrf52Board::handleVoltageShutdown() {
+  if (s_activeInstance) {
+    s_activeInstance->prepareForBoardShutdown();
+  }
+}
+
 void XiaoNrf52Board::begin() {
+  s_activeInstance = this;
+
   // Call base class begin() for DC/DC and common init
   NRF52BoardDCDC::begin();
 
-  // Use reset reason that was captured in early_boot.cpp constructor before SystemInit()
+  // Use values captured in early_boot.cpp constructor before SystemInit()
   startup_reason = g_reset_reason;
+  shutdown_reason = g_shutdown_reason;
 
   // Debug: print the raw value and interpretation
   Serial.begin(115200);
   delay(1000);  // Wait for serial console to init
-  MESH_DEBUG_PRINTLN("INIT: g_reset_reason = 0x%lX - %s",
-    (unsigned long)g_reset_reason, Nrf52PowerMgt::getResetReasonString(startup_reason));
+
+  // Enhanced reset reason reporting - include shutdown reason for wake from SYSTEMOFF
+  if ((startup_reason & POWER_RESETREAS_OFF_Msk) && shutdown_reason != SHUTDOWN_REASON_NONE) {
+    MESH_DEBUG_PRINTLN("INIT: Reset = Wake from SYSTEMOFF (%s)",
+      Nrf52PowerMgt::getShutdownReasonString(shutdown_reason));
+  } else {
+    MESH_DEBUG_PRINTLN("INIT: Reset = %s (0x%lX)",
+      Nrf52PowerMgt::getResetReasonString(startup_reason), (unsigned long)startup_reason);
+  }
 
   // Configure battery voltage ADC pin and settings (one-time initialization)
   pinMode(PIN_VBAT, INPUT);
@@ -37,15 +55,13 @@ void XiaoNrf52Board::begin() {
     MESH_DEBUG_PRINTLN("INIT: Power source = Battery");
     // Only shutdown if reading is valid (>1000mV) AND below threshold
     // This prevents spurious shutdowns on ADC glitches or uninitialized reads
-    if (boot_voltage_mv > 1000 && boot_voltage_mv < PWRMGT_BOOT_THRESHOLD_MV) {
+    if (boot_voltage_mv > 1000 && boot_voltage_mv < PWRMGT_VOLTAGE_BOOTLOCK) {
       MESH_DEBUG_PRINTLN("INIT: CRITICAL: Battery voltage too low (%u mV < %u mV) - entering protective shutdown",
-        boot_voltage_mv, PWRMGT_BOOT_THRESHOLD_MV);
+        boot_voltage_mv, PWRMGT_VOLTAGE_BOOTLOCK);
       delay(100);
-      // Keep VBAT divider enabled for future LPCOMP wake
-      pinMode(VBAT_ENABLE, OUTPUT);
-      digitalWrite(VBAT_ENABLE, LOW);
-      // Enter SYSTEMOFF mode (never returns)
-      Nrf52PowerMgt::enterSystemOff();
+      prepareForBoardShutdown();
+      // Enter SYSTEMOFF (never returns)
+      Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_BOOT_PROTECT);
     } else {
       MESH_DEBUG_PRINTLN("INIT: Battery voltage reading = %u mV", boot_voltage_mv);
     }
@@ -88,6 +104,7 @@ void XiaoNrf52Board::begin() {
 // Set RGB LEDs based on power state (for dev/testing without serial console)
 // LEDs are active LOW on XIAO nRF52 (LOW=ON, HIGH=OFF)
 // Visual scheme: Normal=off, Conserve=Yellow(R+G), Sleep=Blue, Shutdown=Red
+// FIXME: remove LED-based state indicators before production (dev aid only)
 void XiaoNrf52Board::setPowerStateLED(uint8_t state) {
   switch(state) {
     case PowerMgt::STATE_NORMAL:
@@ -132,6 +149,7 @@ void XiaoNrf52Board::loop() {
   }
 
   // Update LED indicator if power state changed
+  // FIXME: remove LED-based state indicators before production (dev aid only)
   if (power_state.state_current != led_power_state) {
     setPowerStateLED(power_state.state_current);
     led_power_state = power_state.state_current;
@@ -153,14 +171,8 @@ void XiaoNrf52Board::loop() {
     uint16_t current_voltage = getBattMilliVolts();
 
     // Monitor voltage and handle state transitions
-    // Use member function for board-specific shutdown callback
-    Nrf52PowerMgt::monitorVoltage(&power_state, current_voltage,
-      []() {
-        // Note: Can't call prepareForBoardShutdown() from static lambda
-        // Board-specific shutdown preparation inline
-        pinMode(VBAT_ENABLE, OUTPUT);
-        digitalWrite(VBAT_ENABLE, LOW);
-      });
+    // Use static member for board-specific shutdown callback
+    Nrf52PowerMgt::monitorVoltage(&power_state, current_voltage, &XiaoNrf52Board::handleVoltageShutdown);
   }
 }
 
