@@ -2,11 +2,12 @@
 
 #include <MeshCore.h>
 #include <Arduino.h>
+#include <helpers/NRF52Board.h>
 #include <helpers/nrf52/Nrf52PowerMgt.h>
 
 #ifdef XIAO_NRF52
 
-class XiaoNrf52Board : public mesh::MainBoard {
+class XiaoNrf52Board : public NRF52BoardDCDC, public NRF52BoardOTA {
 protected:
   uint32_t startup_reason;              // RESETREAS register value
   uint16_t boot_voltage_mv;             // Battery voltage at boot (millivolts)
@@ -28,6 +29,7 @@ protected:
   }
 
 public:
+  XiaoNrf52Board() : NRF52BoardOTA("XIAO_NRF52_OTA") {}
   void begin();
   void loop();  // Periodic tasks (voltage monitoring, LED updates)
 
@@ -60,10 +62,6 @@ public:
     return "Seeed Xiao-nrf52";
   }
 
-  void reboot() override {
-    NVIC_SystemReset();
-  }
-
   void powerOff() override {
     // Set LED on and wait for button release before poweroff
     digitalWrite(PIN_LED, LOW);
@@ -84,8 +82,6 @@ public:
     Nrf52PowerMgt::prepareForShutdown();
     Nrf52PowerMgt::enterSystemOff();
   }
-
-  bool startOTAUpdate(const char* id, char reply[]) override;
 
   bool supportsPowerManagement() override {
     return true;

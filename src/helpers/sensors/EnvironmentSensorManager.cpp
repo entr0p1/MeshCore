@@ -399,7 +399,7 @@ bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, Cayen
     #if ENV_INCLUDE_LPS22HB
     if (LPS22HB_initialized) {
       telemetry.addTemperature(TELEM_CHANNEL_SELF, BARO.readTemperature());
-      telemetry.addBarometricPressure(TELEM_CHANNEL_SELF, BARO.readPressure());
+      telemetry.addBarometricPressure(TELEM_CHANNEL_SELF, BARO.readPressure() * 10); // convert kPa to hPa
     }
     #endif
 
@@ -695,8 +695,8 @@ void EnvironmentSensorManager::loop() {
   static long next_gps_update = 0;
 
   #if ENV_INCLUDE_GPS
+  _location->loop();
   if (millis() > next_gps_update) {
-    _location->loop();
 
     if(gps_active){
     #ifdef RAK_WISBLOCK_GPS

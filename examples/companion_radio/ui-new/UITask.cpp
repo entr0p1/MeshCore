@@ -631,9 +631,13 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   setCurrScreen(msg_preview);
 
   if (_display != NULL) {
-    if (!_display->isOn()) _display->turnOn();
+    if (!_display->isOn() && !hasConnection()) {
+      _display->turnOn();
+    }
+    if (_display->isOn()) {
     _auto_off = millis() + AUTO_OFF_MILLIS;  // extend the auto-off timer
     _next_refresh = 100;  // trigger refresh
+    }
   }
 }
 
@@ -888,14 +892,13 @@ void UITask::toggleGPS() {
           _sensors->setSettingValue("gps", "0");
           _node_prefs->gps_enabled = 0;
           notify(UIEventType::ack);
-          showAlert("GPS: Disabled", 800);
         } else {
           _sensors->setSettingValue("gps", "1");
           _node_prefs->gps_enabled = 1;
           notify(UIEventType::ack);
-          showAlert("GPS: Enabled", 800);
         }
         the_mesh.savePrefs();
+        showAlert(_node_prefs->gps_enabled ? "GPS: Enabled" : "GPS: Disabled", 800);
         _next_refresh = 0;
         break;
       }
@@ -909,13 +912,12 @@ void UITask::toggleBuzzer() {
     if (buzzer.isQuiet()) {
       buzzer.quiet(false);
       notify(UIEventType::ack);
-      showAlert("Buzzer: ON", 800);
     } else {
       buzzer.quiet(true);
-      showAlert("Buzzer: OFF", 800);
     }
     _node_prefs->buzzer_quiet = buzzer.isQuiet();
     the_mesh.savePrefs();
+    showAlert(buzzer.isQuiet() ? "Buzzer: OFF" : "Buzzer: ON", 800);
     _next_refresh = 0;  // trigger refresh
   #endif
 }
