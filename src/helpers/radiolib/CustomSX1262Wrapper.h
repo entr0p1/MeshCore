@@ -20,6 +20,6 @@ public:
     return packetScoreInt(snr, sf, packet_len);
   }
   virtual void powerOff() override {
-    ((CustomSX1262 *)_radio)->sleep(false);
+    ((CustomSX1262 *)_radio)->sleep(true);  // retain config across sleep so wake doesn't need full reinit
   }
 };
