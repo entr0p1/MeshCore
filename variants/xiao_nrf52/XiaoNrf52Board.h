@@ -115,13 +115,13 @@ public:
 
   void getPwrMgtCurrentStateInfo(char* buffer, size_t buflen) const override {
     unsigned long elapsed_sec = (millis() - power_state.state_current_timestamp) / 1000;
-    snprintf(buffer, buflen, "%s (for %lu sec)",
+    snprintf(buffer, buflen, "%s (Started %lu sec ago)",
              PowerMgt::getStateString(power_state.state_current), elapsed_sec);
   }
 
   void getPwrMgtLastStateInfo(char* buffer, size_t buflen) const override {
     unsigned long elapsed_sec = (millis() - power_state.state_last_timestamp) / 1000;
-    snprintf(buffer, buflen, "%s (%lu sec ago)",
+    snprintf(buffer, buflen, "%s (Started %lu sec ago)",
              PowerMgt::getStateString(power_state.state_last), elapsed_sec);
   }
 

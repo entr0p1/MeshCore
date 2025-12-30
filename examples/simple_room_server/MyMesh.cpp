@@ -309,14 +309,14 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
         if (strcmp((char *)&data[8], _prefs.guest_password) == 0) {   // check the room/public password
           // Reject guest logins in power-conserving modes
           if (PowerMgt::isInConserveMode()) {
-            MESH_DEBUG_PRINTLN("Guest login rejected: low power mode");
+            MESH_DEBUG_PRINTLN("Guest login rejected: power management in conserve mode");
             return; // no response
           }
           perm = PERM_ACL_READ_WRITE;
         } else if (_prefs.allow_read_only) {
           // Reject unauthenticated access in power-conserving modes
           if (PowerMgt::isInConserveMode()) {
-            MESH_DEBUG_PRINTLN("Read-only login rejected: low power mode");
+            MESH_DEBUG_PRINTLN("Read-only login rejected: power management in conserve mode");
             return; // no response
           }
           perm = PERM_ACL_GUEST;

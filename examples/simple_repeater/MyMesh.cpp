@@ -100,7 +100,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     } else if (strcmp((char *)data, _prefs.guest_password) == 0) { // check guest password
       // Reject guest logins in power-conserving modes
       if (PowerMgt::isInConserveMode()) {
-        MESH_DEBUG_PRINTLN("Guest login rejected: low power mode");
+        MESH_DEBUG_PRINTLN("Guest login rejected: power management in conserve mode");
         return 0;
       }
       perms = PERM_ACL_GUEST;
