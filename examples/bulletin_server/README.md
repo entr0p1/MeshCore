@@ -1,6 +1,6 @@
-# Bulletin Board Application
+# Bulletin Server Application
 
-A room server clone that adds a bulletin board system where posts can be created via USB serial interface and synchronised to connected clients.
+A room server that adds a bulletin system where posts can be created via USB serial interface and synchronised to connected clients.
 
 ## Features
 
@@ -12,7 +12,7 @@ A room server clone that adds a bulletin board system where posts can be created
 - **Timestamp Preservation**: Stores absolute Unix timestamps (not boot-relative)
 
 ### Display and User Interface
-- **Splash Screen**: 3-second boot screen with firmware version and bulletin board identifier
+- **Splash Screen**: 3-second boot screen with firmware version and server identifier
 - **Status Dashboard**: Node name, ACL statistics, date/time, and clock sync status
 - **Radio Config**: Frequency, spreading factor, bandwidth, coding rate, TX power, noise floor
 - **Message View**: 3 most recent posts with sender IDs and relative timestamps (5s, 3m, 2h ago)
@@ -84,11 +84,11 @@ Minimal interface between mesh networking and UI:
 - Receives notification triggers (via `notify()`)
 - Handles loop updates
 
-The bulletin board uses a **pull model** - UI queries MyMesh directly via `getRecentPosts()` rather than receiving pushed message data like companion_radio.
+The bulletin server uses a **pull model** - UI queries MyMesh directly via `getRecentPosts()` rather than receiving pushed message data like companion_radio.
 
 ## Permissions & Access Control
 
-The bulletin board implements a three-tier permission system:
+The bulletin server implements a three-tier permission system:
 
 - **GUEST (0)**: Read-only access (no password, view posts only)
 - **READ_WRITE (2)**: Standard users (guest password, can create posts when clock synced)
@@ -151,7 +151,7 @@ Connected clients can send commands starting with `!` to query server informatio
 
 ## CLI Commands
 
-### Bulletin Board Commands
+### Bulletin Server Commands
 - `bulletin.info <text>` - Create INFO level bulletin (local only, max 140 chars)
 - `bulletin.warning <text>` - Create WARNING level bulletin (local + broadcast, max 140 chars)
 - `bulletin.critical <text>` - Create CRITICAL level bulletin (local + broadcast, max 140 chars)

@@ -1,6 +1,6 @@
 # File Persistence
 
-The bulletin board saves all critical data to flash storage to survive reboots.
+The bulletin server saves all critical data to flash storage to survive reboots.
 
 ## Posts Storage
 

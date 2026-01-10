@@ -23,20 +23,21 @@
 #include <RTClib.h>
 #include <target.h>
 
-// Forward declaration
+// Forward declarations
 class SystemMessageQueue;
+class SDStorage;
 
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "2 Oct 2025"
+  #define FIRMWARE_BUILD_DATE   "10 Jan 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
   #define FIRMWARE_VERSION   "v1.0.0"
 #endif
 
-#define MESHCORE_VERSION "1.10.0"
+#define MESHCORE_VERSION "1.11.0"
 
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0
@@ -55,7 +56,7 @@ class SystemMessageQueue;
 #endif
 
 #ifndef ADVERT_NAME
-  #define  ADVERT_NAME   "Test BBS"
+  #define  ADVERT_NAME   "Bulletin Server"
 #endif
 #ifndef ADVERT_LAT
   #define  ADVERT_LAT  0.0
@@ -137,9 +138,10 @@ struct RepeaterAdvert {
   uint32_t received_time;    // Our clock time when advert was received (for aging)
 };
 
-// Bulletin board room server - manages posts, client sync, and flash persistence
+// Bulletin server - manages posts, client sync, and flash persistence
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
+  SDStorage* _sd;  // SD card storage (ESP32 only, may be null)
   unsigned long next_local_advert, next_flood_advert;
   bool _logging;
   NodePrefs _prefs;
@@ -255,10 +257,16 @@ protected:
   void onAckRecv(mesh::Packet* packet, uint32_t ack_crc) override;
   void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
 
+#if ENV_INCLUDE_GPS == 1
+  void applyGpsPrefs() {  // v1.11.0
+    sensors.setSettingValue("gps", _prefs.gps_enabled?"1":"0");
+  }
+#endif
+
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
 
-  void begin(FILESYSTEM* fs);
+  void begin(FILESYSTEM* fs, SDStorage* sd = nullptr);
 
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
   const char* getBuildDate() override { return FIRMWARE_BUILD_DATE; }
@@ -268,6 +276,7 @@ public:
     return &_prefs;
   }
   ClientACL* getACL() { return &acl; }
+  SDStorage* getSDStorage() { return _sd; }
   uint16_t getNumPosted() const { return _num_posted; }
 
   // Platform-specific file open for writing (used by SystemMessageQueue)

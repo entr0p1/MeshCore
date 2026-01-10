@@ -1,6 +1,6 @@
 # JSON Serial Output Format
 
-The bulletin board server outputs structured JSON to the serial console for all significant events. This allows external applications to monitor activity and integrate with the mesh network.
+The bulletin server outputs structured JSON to the serial console for all significant events. This allows external applications to monitor activity and integrate with the mesh network.
 
 ## JSON Structure
 

@@ -1,56 +1,22 @@
-# Clock Synchronisation Logic
+# Clock Synchronisation
 
 ## Overview
 
-The bulletin board server's Real-Time Clock (RTC) resets to a default value (typically year 2000 or 1970) on every cold boot, losing track of the current date and time. Since all bulletin posts are timestamped using the RTC, accurate timekeeping is critical for proper message ordering and synchronisation.
+MCU Boards without a powered RTC reset to a default value on every cold boot, losing track of the current date and time. Since all bulletin posts are timestamped using the RTC, accurate timekeeping is critical for proper message ordering and synchronisation.
 
 This document describes the automatic clock synchronisation system that ensures the server obtains accurate time from trusted admin users on the mesh network.
 
 ---
 
-## Why Clock Synchronisation is Needed
+## Synchronisation Logic
+If the clock is set to before January 1, 2025 00:00:00 UTC it is considered not synced. When not synced, some protection mechanisms kick in to prevent adding bad data to the server.
+- **Read-only mode when desynced**: Server blocks bulletin and message posting until clock is synced
+- **System messages notify admins**: Admins listed in the ACL receive notifications about desync state, sync source, and when sync succeeds
 
-### The Problem
-- **RTC resets on boot**: ESP32, nRF52, and similar microcontrollers do not have battery-backed RTCs
-- **Posts need timestamps**: Every bulletin post is stamped with `getCurrentTimeUnique()` from the RTC
-- **Ordering matters**: Posts are synced to clients in chronological order based on timestamps
-- **Invalid timestamps break sync**: If the clock shows year 2000, all posts get incorrect timestamps
+The clock can be synchronised the same standard ways in MeshCore (via the app or CLI), plus the following automated methods are available:
+- **Admin sync**: When an admin user sends any packet (login, message, command), their timestamp is used to set the server's clock
+- **Network sync (Optional)**: When no admin available, server can automatically sync from repeater advertisements (requires 3 repeaters with agreeing timestamps). Clock syncs once only on boot, and cannot go backwards.
 
-### The Solution
-- **Multiple automatic sync sources**:
-  - **Admin sync**: When an admin user sends any packet (login, message, command), their timestamp is used to set the server's clock
-  - **Network sync**: When no admin available, server automatically syncs from repeater advertisements (requires 3 repeaters with agreeing timestamps)
-  - **Manual sync**: CLI commands allow manual intervention
-- **One-time sync per boot**: Clock syncs once, preventing time regression attacks
-- **Read-only mode when desynced**: Server blocks bulletin creation until clock is synced
-- **System messages notify admins**: Admins receive notifications about desync state, sync source, and when sync succeeds
-- **Configurable network sync**: Tolerance window and enable/disable controls via CLI
-
----
-
-## Desync Detection
-
-### How It Works
-
-```cpp
-bool MyMesh::isDesynced() const {
-  return getRTCClock()->getCurrentTime() < MIN_VALID_TIMESTAMP;
-}
-```
-
-**Threshold**: `MIN_VALID_TIMESTAMP = 1735689600` (January 1, 2025 00:00:00 UTC)
-
-### Logic
-- If RTC time is **before** January 1, 2025 → **desynced**
-- If RTC time is **on or after** January 1, 2025 → **synced**
-
-### Why This Works
-- MeshCore bulletin board deployments began in 2025
-- Any clock showing a date before 2025 is clearly wrong
-- Simple integer comparison, no complex date parsing
-- No false positives in production use
-
----
 
 ## Boot Behaviour
 
@@ -553,7 +519,7 @@ int MyMesh::getRecentPosts(const PostInfo** dest, int max_posts) const {
 }
 ```
 
-**Reason**: System messages are for mesh admins, not for local display on the bulletin board device itself.
+**Reason**: System messages are for mesh admins, not for local display on the bulletin server device itself.
 
 ### Companion App (mesh clients)
 
@@ -562,9 +528,9 @@ int MyMesh::getRecentPosts(const PostInfo** dest, int max_posts) const {
 1. System message created with `timestamp=0`
 2. Pushed to admin clients via `pushPostToClient()`
 3. Companion radio forwards to mobile app over BLE
-4. **Mobile app displays** the system message in the bulletin board's message feed
+4. **Mobile app displays** the system message in the bulletin server's message feed
 
-**Result**: Admins on mobile see system messages, but the bulletin board's own display does not show them.
+**Result**: Admins on mobile see system messages, but the bulletin server's own display does not show them.
 
 ---
 

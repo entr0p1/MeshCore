@@ -90,7 +90,7 @@ public:
     display.setTextSize(1);
     display.drawTextCentered(display.width()/2, 42, FIRMWARE_BUILD_DATE);
 
-    const char* node_type = "< Bulletin Board >";
+    const char* node_type = "< Bulletin Server >";
     display.drawTextCentered(display.width()/2, 54, node_type);
 
     return 1000;

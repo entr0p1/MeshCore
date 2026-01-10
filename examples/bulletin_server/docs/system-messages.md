@@ -2,13 +2,7 @@
 
 ## Overview
 
-System messages are special notifications sent to admin users about server state changes, particularly around clock synchronisation. They are delivered via the same mesh protocol as regular bulletin posts but have unique handling requirements.
-
----
-
-## Why System Messages Exist
-
-The bulletin board server's RTC (Real-Time Clock) resets on every cold boot, losing track of current time. Since all bulletins are timestamped, accurate timekeeping is critical. System messages notify admins about:
+System messages are special notifications sent to admin users over the mesh about server state changes. For example:
 
 1. **Clock desync on boot** - Server is in read-only mode
 2. **Clock sync success** - Server transitions to read-write mode
@@ -263,7 +257,7 @@ struct SystemMessage {
 
 ### ❌ DON'T: Use Non-Zero Timestamps
 
-**Why**: System messages are filtered from local UI display using `timestamp=0` marker. Non-zero timestamps would show them on the bulletin board display.
+**Why**: System messages are filtered from local UI display using `timestamp=0` marker. Non-zero timestamps would show them on the bulletin server display.
 
 ### ❌ DON'T: Mark Delivered Before ACK
 

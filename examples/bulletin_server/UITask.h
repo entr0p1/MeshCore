@@ -11,7 +11,7 @@
 
 #include "AbstractUITask.h"
 
-// UI task for bulletin board - handles display screens, input, and message preview
+// UI task for bulletin server - handles display screens, input, and message preview
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
   SensorManager* _sensors;
@@ -33,8 +33,11 @@ class UITask : public AbstractUITask {
   UIScreen* curr;
 
   void userLedHandler();
+
+  // Button action handlers
   char checkDisplayOn(char c);
   char handleLongPress(char c);
+  
   void setCurrScreen(UIScreen* c);
 
 public:
@@ -54,4 +57,6 @@ public:
   // from AbstractUITask
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
+
+  void shutdown(bool restart = false);
 };

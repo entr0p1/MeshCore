@@ -7,6 +7,10 @@
 #include <helpers/BaseSerialInterface.h>
 #include <Arduino.h>
 
+#ifdef PIN_BUZZER
+  #include <helpers/ui/buzzer.h>
+#endif
+
 enum class UIEventType {
     none,
     roomMessage,
@@ -14,7 +18,7 @@ enum class UIEventType {
 };
 
 // Abstract interface between mesh networking and UI
-// Bulletin board uses a pull model: UI queries MyMesh via getRecentPosts() rather than receiving pushed updates
+// Bulletin server uses a pull model: UI queries MyMesh via getRecentPosts() rather than receiving pushed updates
 class AbstractUITask {
 protected:
   mesh::MainBoard* _board;

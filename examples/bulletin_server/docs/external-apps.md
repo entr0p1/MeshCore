@@ -1,6 +1,6 @@
 # External Application Integration
 
-The bulletin board server provides a bidirectional command/response system that allows external applications (running on the same host via serial) to receive commands from mesh users and send responses back.
+The bulletin server provides a bidirectional command/response system that allows external applications (running on the same host via serial) to receive commands from mesh users and send responses back.
 
 ## Overview
 
@@ -15,7 +15,6 @@ Connected clients can send commands to external applications:
 ```
 !app weather forecast
 !app sensor temperature
-!app control lights_on
 ```
 
 **Format:** `!app <app_name> <command>`

@@ -1,6 +1,6 @@
 # Permissions & Access Control
 
-The bulletin board implements a three-tier permission system to control what users can do.
+The bulletin server implements a three-tier permission system to control what users can do.
 
 ## Permission Levels
 
@@ -146,7 +146,7 @@ setperm A1B2C3D4E5F6... 3  # Grant admin (saves to ACL)
 
 ## Clock-Based Restrictions
 
-The bulletin board enforces **read-only mode** when the server's RTC is desynced (year < 2025):
+The bulletin server enforces **read-only mode** when the server's RTC is desynced (year < 2025):
 
 **Blocked operations:**
 - ❌ `addbulletin` command (serial) - returns error

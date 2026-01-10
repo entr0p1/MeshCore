@@ -1,4 +1,12 @@
-# Bulletin Board Changelog
+# Bulletin Server Changelog
+
+## v1.0.0 - Beta 2
+### Breaking Changes
+None (yet)
+
+### Features and Improvements
+- Updated MeshCore base firmware to 1.11.0
+
 
 ## v1.0.0 - Beta 1
 

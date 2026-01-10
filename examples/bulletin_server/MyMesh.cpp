@@ -1,5 +1,6 @@
 #include "MyMesh.h"
 #include "SystemMessageQueue.h"
+#include "SDStorage.h"
 
 #ifdef DISPLAY_CLASS
 #include "UITask.h"
@@ -968,6 +969,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
   _logging = false;
+  _sd = nullptr;
   set_radio_at = revert_radio_at = 0;
   current_boot_sequence = 0;
   system_msgs = new SystemMessageQueue();
@@ -1001,6 +1003,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.airtime_factor = 1.0;   // one half
   _prefs.rx_delay_base = 0.0f;   // off by default, was 10.0
   _prefs.tx_delay_factor = 0.5f; // was 0.25f;
+  _prefs.direct_tx_delay_factor = 0.2f; // v1.11.0
+  _prefs.gps_enabled = 0;  // v1.11.0
+  _prefs.gps_interval = 0; // v1.11.0
+  _prefs.advert_loc_policy = ADVERT_LOC_PREFS; // v1.11.0
   StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, sizeof(_prefs.node_name));
   _prefs.node_lat = ADVERT_LAT;
   _prefs.node_lon = ADVERT_LON;
@@ -1531,9 +1537,10 @@ void MyMesh::notifyClockSyncedFromRepeaters() {
 
 // ----------------------------------------------------------------------------
 
-void MyMesh::begin(FILESYSTEM *fs) {
+void MyMesh::begin(FILESYSTEM *fs, SDStorage* sd) {
   mesh::Mesh::begin();
   _fs = fs;
+  _sd = sd;
 
   // Load and increment boot counter
   current_boot_sequence = loadBootCounter(_fs);
@@ -1578,6 +1585,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   updateAdvertTimer();
   updateFloodAdvertTimer();
+
+  board.setAdcMultiplier(_prefs.adc_multiplier);  // v1.11.0
+
+#if ENV_INCLUDE_GPS == 1
+  applyGpsPrefs();  // v1.11.0
+#endif
 }
 
 void MyMesh::applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) {
@@ -2012,6 +2025,18 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
           strcpy(reply, "ERROR: Invalid pubkey hex");
         }
       }
+    }
+  }
+  // SD card commands
+  else if (strcmp(command, "erase.sdcard") == 0) {
+    if (_sd && _sd->isReady()) {
+      if (_sd->eraseAllData()) {
+        strcpy(reply, "OK - SD card data erased");
+      } else {
+        strcpy(reply, "ERROR: Erase failed");
+      }
+    } else {
+      strcpy(reply, "ERROR: SD card not available");
     }
   } else {
     bool was_desynced = isDesynced();

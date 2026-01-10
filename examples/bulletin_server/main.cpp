@@ -1,13 +1,13 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
-
 #include "MyMesh.h"
+#include "SDStorage.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   #include "AbstractUITask.h"
 
-  // Stub serial interface (bulletin board doesn't use BLE/serial like companion_radio)
+  // Stub serial interface (bulletin server doesn't use BLE/serial like companion_radio)
   class StubSerial : public BaseSerialInterface {
   public:
     bool isEnabled() const override { return false; }
@@ -85,7 +85,18 @@ void setup() {
 
   sensors.begin();
 
-  the_mesh.begin(fs);
+  // Initialize SD card storage (ESP32 with SD_CS_PIN only)
+  SDStorage* sd_storage = nullptr;
+#if defined(ESP32) && defined(SD_CS_PIN)
+  static SDStorage sd;
+  if (sd.begin()) {
+    sd_storage = &sd;
+  } else {
+    Serial.println("SD card not available - storage features disabled");
+  }
+#endif
+
+  the_mesh.begin(fs, sd_storage);
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(&display, &sensors, the_mesh.getNodePrefs());

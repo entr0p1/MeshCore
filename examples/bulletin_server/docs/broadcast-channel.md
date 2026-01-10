@@ -1,6 +1,6 @@
 # Broadcast Channel
 
-The bulletin board supports broadcasting WARNING and CRITICAL bulletins to all nodes in the mesh via a shared channel. This allows important alerts to reach everyone, not just connected clients.
+The bulletin server supports broadcasting WARNING and CRITICAL bulletins to all nodes in the mesh via a shared channel. This allows important alerts to reach everyone, not just connected clients.
 
 ## Channel Modes
 
