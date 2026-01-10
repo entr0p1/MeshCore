@@ -81,10 +81,10 @@ static const uint8_t D10 = 10;
 
 // Power management voltage thresholds (millivolts) - based on LiPo discharge curve
 // These are board-specific as different battery chemistries have different curves
-#define PWRMGT_VOLTAGE_CONSERVE    3500   // Runtime: enter Conserve mode below this
-#define PWRMGT_VOLTAGE_SLEEP       3200   // Runtime: enter Sleep mode below this
-#define PWRMGT_VOLTAGE_SHUTDOWN    2950   // Runtime: enter SYSTEMOFF below this
-#define PWRMGT_VOLTAGE_BOOTLOCK    3000   // Boot protection: won't boot below this (0 = disabled)
+#define PWRMGT_VOLTAGE_CONSERVE    3600   // Runtime: enter Conserve mode below this
+#define PWRMGT_VOLTAGE_SLEEP       3400   // Runtime: enter Sleep mode below this
+#define PWRMGT_VOLTAGE_SHUTDOWN    3300   // Runtime: enter SYSTEMOFF below this
+#define PWRMGT_VOLTAGE_BOOTLOCK    3400   // Boot protection: won't boot below this (0 = disabled)
 
 // LPCOMP wake configuration (voltage recovery from SYSTEMOFF)
 #define PWRMGT_LPCOMP_AIN           7     // AIN7 = P0.31 = PIN_VBAT
