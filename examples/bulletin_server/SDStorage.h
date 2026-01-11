@@ -24,7 +24,7 @@ public:
   SDStorage();
 
   // Initialize SD card (call in setup, after board.begin())
-  // cs_pin: -1 = use board default from SD_CS_PIN define
+  // cs_pin: -1 = use board default from PIN_SDCARD_CS define
   // Returns true if SD card is ready for use
   bool begin(int cs_pin = -1);
 

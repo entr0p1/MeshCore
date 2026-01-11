@@ -4,8 +4,8 @@ SDStorage::SDStorage() : _status(SD_NOT_SUPPORTED), _cs_pin(-1) {}
 
 bool SDStorage::begin(int cs_pin) {
 #ifdef ESP32
-  #ifdef SD_CS_PIN
-    _cs_pin = (cs_pin >= 0) ? cs_pin : SD_CS_PIN;
+  #ifdef PIN_SDCARD_CS
+    _cs_pin = (cs_pin >= 0) ? cs_pin : PIN_SDCARD_CS;
   #else
     _cs_pin = cs_pin;
   #endif

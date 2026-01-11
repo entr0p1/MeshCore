@@ -1,64 +1,27 @@
 # Broadcast Channel
 
-The bulletin server supports broadcasting WARNING and CRITICAL bulletins to all nodes in the mesh via a shared channel. This allows important alerts to reach everyone, not just connected clients.
+## Overview
+Warning and critical bulletins are duplicated to a MeshCore group channel so nodes can receive urgent alerts even without a room session. Info bulletins are local only.
 
-## Channel Modes
+## Channel modes
+- Public (default): channel secret is derived from the server public key (first 16 bytes).
+- Private: channel secret is a random 16-byte key stored in flash; switching to private regenerates the key.
 
-### Public Mode (default)
-- Uses the server's public key as the channel key
-- Anyone can listen to broadcasts by knowing the server's identity
-- Suitable for open networks where all users trust each other
+## How broadcasts are sent
+- Broadcasts are best-effort group messages (no ACKs).
+- Message text is formatted as `<node_name>: BLTN-WARN: <text>` or `<node_name>: BLTN-CRIT: <text>`.
+- Broadcasts occur in addition to normal post storage and sync.
 
-### Private Mode
-- Uses a randomly generated 16-byte secret key
-- Only users with the channel key can decrypt broadcasts
-- Key is shared via the `channel private` command output or `!channelkey` user command
-- Suitable for private networks with access control
+## Admin controls
+- `get channel.mode` shows current mode.
+- `set channel.mode public` switches to public mode.
+- `set channel.mode private` switches to private mode and generates a new secret.
+- `channel`, `channel public`, and `channel private` are shorthand equivalents.
+- Users can retrieve the current key with `!channelkey`.
 
-## Channel Configuration
+## Storage
+- `/channel_cfg` stores the mode and secret.
 
-**View current mode:**
-```
-channel
-```
-
-**Switch to public mode:**
-```
-channel public
-```
-
-**Switch to private mode:**
-```
-channel private
-```
-Output:
-```json
-{"component":"config","action":"update","data":{"type":"channel","mode":"private","key":"A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"}}
-```
-
-**Get channel key (user command):**
-```
-!channelkey
-```
-Returns the 32-character hex key (16 bytes) for the current channel.
-
-## Broadcast Behaviour
-
-- Only WARNING and CRITICAL severity bulletins are broadcast
-- Broadcasts use `PAYLOAD_TYPE_GRP_TXT` group message format with `TXT_TYPE_SIGNED_PLAIN`
-- Server identity (pub_key + name) included in all broadcasts for authenticity
-- All nodes on the same channel receive broadcasts immediately
-- No ACKs or delivery confirmation (fire-and-forget)
-- Compatible with MeshCore group channel functionality
-- Messages display identically in channel and room views
-
-## Configuration Storage
-
-Channel configuration is persisted to flash at `/channel_cfg`:
-```cpp
-struct BulletinChannelConfig {
-  bool mode_private;         // false=public, true=private
-  uint8_t secret[16];        // Private channel key (only used if mode_private==true)
-  uint32_t guard;            // 0xDEADBEEF validation marker
-};
-```
+## Troubleshooting
+- If nodes do not receive broadcasts, confirm they are subscribed to the correct group channel and that the key matches `!channelkey`.
+- Very long bulletins may be truncated by group payload limits; keep alerts concise.

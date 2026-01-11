@@ -1,48 +1,29 @@
 # File Persistence
 
-The bulletin server saves all critical data to flash storage to survive reboots.
+## Overview
+The bulletin server stores state on the platform filesystem so it survives reboot. Files are stored on the on-device flash filesystem unless otherwise noted.
 
-## Posts Storage
+## Persisted files
+- `/com_prefs`: MeshCore preferences (node name, passwords, radio settings, and other CommonCLI values).
+- `/s_contacts`: admin access list (admins only).
+- `/posts`: circular buffer of up to 32 posts (author pubkey, timestamp, text). System messages (timestamp 0) are not saved here.
+- `/system_msgs`: queue of up to 8 system messages with per-admin delivery tracking.
+- `/boot_count`: 32-bit boot sequence used in system message formatting.
+- `/channel_cfg`: broadcast channel mode and secret.
+- `/netsync_cfg`: network time sync settings.
+- `/packet_log`: packet log when logging is enabled.
 
-Posts are saved to flash in `/posts` file with this format:
-```
-[version:1][next_post_idx:4][post_1][post_2]...[post_32]
-```
+## SD card backups (ESP32 only)
+When an SD card is present, the server mounts a `/bulletin` directory. Configuration files are mirrored to SD on change so a second copy is always available:
+- `/com_prefs`
+- `/s_contacts`
+- `/channel_cfg`
+- `/netsync_cfg`
 
-Each post contains:
-- Author public key (32 bytes)
-- Post timestamp (4 bytes, Unix time)
-- Text length (1 byte)
-- Text content (variable, max 151 bytes)
+On boot, if a flash config file is missing or unreadable, it is restored from the SD copy. After `erase.sdcard`, the current config is copied back to the SD card.
 
-**Note**: System messages (timestamp=0) are NOT saved to the posts file.
-
-## System Messages Storage
-
-System messages are stored separately in `/system_msgs`:
-```
-[num_messages:1][message_1][message_2]...[message_8]
-```
-
-Each system message contains:
-- Text (152 bytes)
-- Boot sequence (4 bytes)
-- Created millis (4 bytes)
-- Delivered-to tracking (MAX_CLIENTS * 6 bytes)
-
-## Boot Counter
-
-Boot sequence tracking stored in `/boot_count`:
-- Single uint32_t value
-- Incremented on each boot
-- Used for system message ordering
-
-## Platform Compatibility
-
-The persistence implementation uses platform-specific file operations to ensure compatibility across:
-- **NRF52**: InternalFileSystem
-- **RP2040**: LittleFS
-- **STM32**: LittleFS
-- **ESP32**: SPIFFS
-
-All platforms use a common abstraction layer for file I/O.
+## Platform filesystems
+- NRF52: InternalFileSystem
+- RP2040: LittleFS
+- STM32: LittleFS
+- ESP32: SPIFFS

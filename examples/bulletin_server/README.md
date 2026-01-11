@@ -210,11 +210,13 @@ See [docs/broadcast-channel.md](docs/broadcast-channel.md) for detailed channel 
 
 All critical data is saved to flash and survives reboots:
 
+- **Common Prefs**: `/com_prefs` - MeshCore preferences (node name, passwords, radio settings)
+- **ACL**: `/s_contacts` - Admin user access list
 - **Posts**: `/posts` - Bulletin messages with author, timestamp, and text
 - **System Messages**: `/system_msgs` - Admin notifications with boot sequence tracking
 - **Boot Counter**: `/boot_count` - Incremented on each boot for message ordering
 - **Channel Config**: `/channel_cfg` - Broadcast channel mode and secret key
-- **ACL**: `/acl` - Admin user access list
+- **Net Sync Config**: `/netsync_cfg` - Network time sync settings
 
 See [docs/file-persistence.md](docs/file-persistence.md) for detailed storage formats and platform compatibility.
 
@@ -238,7 +240,7 @@ set nettime.maxwait <5-60>   # Agreement window in minutes (default: 15)
 get nettime.status           # Check sync status and repeater count
 ```
 
-See [docs/timesync-logic.md](docs/timesync-logic.md) and [docs/system-messages.md](docs/system-messages.md) for complete technical details.
+See [docs/timesync.md](docs/timesync.md) and [docs/system-messages.md](docs/system-messages.md) for complete technical details.
 
 ## Platform Support
 
