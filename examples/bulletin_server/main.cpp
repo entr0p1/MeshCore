@@ -2,6 +2,7 @@
 #include <Mesh.h>
 #include "MyMesh.h"
 #include "SDStorage.h"
+#include "SerialConsoleHandler.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -31,7 +32,7 @@ void halt() {
   while (1) ;
 }
 
-static char command[MAX_POST_TEXT_LEN+1];
+static SerialConsoleHandler* serial_console;
 
 void setup() {
   Serial.begin(115200);
@@ -81,8 +82,6 @@ void setup() {
   Serial.print("Room ID: ");
   mesh::Utils::printHex(Serial, the_mesh.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
 
-  command[0] = 0;
-
   sensors.begin();
 
   // Initialize SD card storage (ESP32 with SD_CS_PIN only)
@@ -97,6 +96,9 @@ void setup() {
 #endif
 
   the_mesh.begin(fs, sd_storage);
+
+  // Initialize serial console handler
+  serial_console = new SerialConsoleHandler(&the_mesh);
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(&display, &sensors, the_mesh.getNodePrefs());
@@ -117,30 +119,7 @@ void loop() {
   }
 #endif
 
-  int len = strlen(command);
-  while (Serial.available() && len < sizeof(command)-1) {
-    char c = Serial.read();
-    if (c != '\n') {
-      command[len++] = c;
-      command[len] = 0;
-    }
-    Serial.print(c);
-  }
-  if (len == sizeof(command)-1) {  // command buffer full
-    command[sizeof(command)-1] = '\r';
-  }
-
-  if (len > 0 && command[len - 1] == '\r') {  // received complete line
-    command[len - 1] = 0;  // replace newline with C string null terminator
-    char reply[160];
-    the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
-    if (reply[0]) {
-      Serial.print("  -> "); Serial.println(reply);
-    }
-
-    command[0] = 0;  // reset command buffer
-  }
-
+  serial_console->loop();
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS

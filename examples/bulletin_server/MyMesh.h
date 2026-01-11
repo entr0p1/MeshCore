@@ -24,8 +24,10 @@
 #include <target.h>
 
 // Forward declarations
-class SystemMessageQueue;
+class SystemMessageHandler;
 class SDStorage;
+class FirmwareCLI;
+class UserCLI;
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -142,6 +144,8 @@ struct RepeaterAdvert {
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
   SDStorage* _sd;  // SD card storage (ESP32 only, may be null)
+  FirmwareCLI* _firmware_cli;  // Bulletin server CLI commands
+  UserCLI* _user_cli;          // User CLI commands (! prefix)
   unsigned long next_local_advert, next_flood_advert;
   bool _logging;
   NodePrefs _prefs;
@@ -162,7 +166,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
   uint32_t current_boot_sequence;
-  SystemMessageQueue* system_msgs;
+  SystemMessageHandler* system_msgs;
   bool clock_synced_once;  // Track if clock has been synced this boot
   int16_t pending_system_msg_idx[MAX_CLIENTS];  // System message index awaiting ACK per client (-1 = none)
   uint8_t system_msg_prelogin_attempts[MAX_CLIENTS][8];  // Pre-login delivery attempts per client per message (max 8 system messages)
@@ -213,8 +217,6 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void loadChannelConfig();
   void saveChannelConfig();
   void initialiseChannel();
-  void setChannelModePublic();
-  void setChannelModePrivate();
   void broadcastBulletin(const char* bulletinText, PostSeverity severity);
 
   // JSON serial output helpers
@@ -279,7 +281,7 @@ public:
   SDStorage* getSDStorage() { return _sd; }
   uint16_t getNumPosted() const { return _num_posted; }
 
-  // Platform-specific file open for writing (used by SystemMessageQueue)
+  // Platform-specific file open for writing (used by SystemMessageHandler)
   static File openFileForWrite(FILESYSTEM* fs, const char* filename);
 
   void savePrefs() override {
@@ -321,6 +323,28 @@ public:
   int getRecentPosts(const PostInfo** dest, int max_posts) const;  // Get latest N posts for display
   bool isDesynced() const;  // Check if RTC clock is desynced (year < 2025)
   void loop();
+
+  // FirmwareCLI helper methods
+  void scheduleLazyWrite();  // Schedule delayed contacts/ACL save
+  bool checkBulletinRateLimit(char* reply);  // Check rate limit, write error to reply if exceeded
+  void updateBulletinRateLimit();  // Update last bulletin time
+  void setNetsyncEnabled(bool enabled);
+  bool isNetsyncEnabled() const;
+  void setNetsyncMaxwait(int mins);
+  int getNetsyncMaxwait() const;
+  bool isClockSynced() const;
+  int getRepeaterCount() const;
+  bool isChannelPrivate() const;
+  void setChannelModePublic();
+  void setChannelModePrivate();
+  int getLoginHistoryCount() const;
+  bool getLoginHistoryEntry(int idx, LoginHistoryEntry& entry) const;
+  bool sendAppReply(const char* app_name, const uint8_t* pubkey, const char* response_text);
+
+  // UserCLI helper methods
+  void logUserCommand(const char* action, const char* text, const uint8_t* user_pubkey, uint32_t timestamp);
+  void formatChannelKey(char* dest, size_t len);
+  void markPendingAppRequest(ClientInfo* client);
 };
 
 extern MyMesh the_mesh;

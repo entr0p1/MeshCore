@@ -28,12 +28,12 @@ struct SystemMessage {
 };
 
 // Persistent queue of system messages with per-admin delivery tracking
-class SystemMessageQueue {
+class SystemMessageHandler {
   SystemMessage messages[MAX_SYSTEM_MESSAGES];
   int num_messages;
 
 public:
-  SystemMessageQueue() {
+  SystemMessageHandler() {
     memset(messages, 0, sizeof(messages));
     num_messages = 0;
   }

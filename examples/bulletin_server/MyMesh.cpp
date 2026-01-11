@@ -1,6 +1,8 @@
 #include "MyMesh.h"
-#include "SystemMessageQueue.h"
+#include "SystemMessageHandler.h"
 #include "SDStorage.h"
+#include "FirmwareCLI.h"
+#include "UserCLI.h"
 
 #ifdef DISPLAY_CLASS
 #include "UITask.h"
@@ -541,174 +543,7 @@ void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
 }
 
 bool MyMesh::handleUserCommand(ClientInfo* client, mesh::Packet* packet, const char* command, char* reply) {
-  // Check if this is a user command (starts with '!')
-  if (command[0] != '!') {
-    return false;  // Not a user command
-  }
-
-  const char* cmd = &command[1];  // Skip '!' prefix
-  uint32_t timestamp = getRTCClock()->getCurrentTime();
-
-  // Log request
-  printJSONSerialLog("app", "request", "command", NULL, cmd,
-                     client->id.pub_key, "mesh", timestamp);
-
-  // Handle specific commands
-  if (strcmp(cmd, "help") == 0) {
-    strcpy(reply, "Commands:\n!help [cmd]\n!version\n!channel\n!channelkey\n!rxp\n!txp\n!app <app_name> <command>");
-  } else if (strncmp(cmd, "help ", 5) == 0) {
-    // Per-command help
-    const char* help_cmd = &cmd[5];
-    if (strcmp(help_cmd, "version") == 0) {
-      strcpy(reply, "!version: Display firmware and MeshCore version info");
-    } else if (strcmp(help_cmd, "channel") == 0) {
-      strcpy(reply, "!channel: Display current broadcast channel mode (public/private)");
-    } else if (strcmp(help_cmd, "channelkey") == 0) {
-      strcpy(reply, "!channelkey: Display the channel encryption key (hex)");
-    } else if (strcmp(help_cmd, "rxp") == 0) {
-      strcpy(reply, "!rxp: Display the receive path (route from you to server)");
-    } else if (strcmp(help_cmd, "txp") == 0) {
-      strcpy(reply, "!txp: Display the transmit path (route from server to you)");
-    } else if (strcmp(help_cmd, "app") == 0) {
-      strcpy(reply, "!app <app_name> <command>: Send command to external application");
-    } else {
-      strcpy(reply, "Unknown command. Type !help for list.");
-    }
-  } else if (strcmp(cmd, "version") == 0) {
-    sprintf(reply, "Firmware: %s (%s)\nMeshCore: %s\nRole: %s",
-            FIRMWARE_VERSION, FIRMWARE_BUILD_DATE, MESHCORE_VERSION, FIRMWARE_ROLE);
-  } else if (strcmp(cmd, "channel") == 0) {
-    if (channel_config.mode_private) {
-      strcpy(reply, "Mode: private\nUse !channelkey to print key.");
-    } else {
-      strcpy(reply, "Mode: public\nChannel is using server's public key. Use !channelkey to print key.");
-    }
-  } else if (strcmp(cmd, "channelkey") == 0) {
-    char* pos = reply;
-    int remaining = MAX_USER_REPLY_SIZE;
-    if (channel_config.mode_private) {
-      //Channel mode is private - return secret key from config
-      for (int i = 0; i < CHANNEL_KEY_LEN && remaining > 3; i++) {
-        snprintf(pos, remaining, "%02X", channel_config.secret[i]);
-        pos += 2;
-        remaining -= 2;
-      }
-      *pos = 0;
-    } else {
-      //Channel mode is public - print node public key
-      for (int i = 0; i < CHANNEL_KEY_LEN && remaining > 3; i++) {
-        snprintf(pos, remaining, "%02X", the_mesh.self_id.pub_key[i]);
-        pos += 2;
-        remaining -= 2;
-      }
-      *pos = 0;
-    }
-  } else if (strcmp(cmd, "rxp") == 0) {
-    // Show RX routing info
-    if (packet->isRouteFlood()) {
-      sprintf(reply, "RX Path: FLOOD (path_len=%d)", packet->path_len);
-      if (packet->path_len > 0) {
-        char* pos = reply + strlen(reply);
-        strcpy(pos, " [");
-        pos += 2;
-        for (int i = 0; i < packet->path_len && i < 6; i++) {
-          sprintf(pos, "%02X", packet->path[i]);
-          pos += 2;
-          if (i < packet->path_len - 1) *pos++ = ' ';
-        }
-        *pos++ = ']';
-        *pos = 0;
-      }
-    } else {
-      // DIRECT routing - check if zero-hop or consumed path
-      if (packet->path_len == 0) {
-        strcpy(reply, "RX Path: DIRECT (zero-hop)");
-      } else {
-        strcpy(reply, "RX Path: DIRECT (consumed)");
-      }
-    }
-  } else if (strcmp(cmd, "txp") == 0) {
-    // Show TX path (out_path)
-    if (client->out_path_len < 0) {
-      strcpy(reply, "TX Path: FLOOD (path unknown)");
-    } else if (client->out_path_len == 0) {
-      strcpy(reply, "TX Path: DIRECT (zero-hop)");
-    } else {
-      sprintf(reply, "TX Path: DIRECT [");
-      char* pos = reply + strlen(reply);
-      for (int i = 0; i < client->out_path_len && i < 6; i++) {
-        sprintf(pos, "%02X", client->out_path[i]);
-        pos += 2;
-        if (i < client->out_path_len - 1) *pos++ = ' ';
-      }
-      *pos++ = ']';
-      *pos = 0;
-    }
-  } else if (strcmp(cmd, "app") == 0) {
-    // !app without parameters - show usage
-    strcpy(reply, "Usage: !app <app_name> <command>\nSends command to external application.");
-  } else if (strncmp(cmd, "app ", 4) == 0) {
-    // External application command - forward request to serial
-    const char* app_data = &cmd[4];
-
-    // Check if app_data is empty (just spaces)
-    while (*app_data == ' ') app_data++;
-    if (*app_data == 0) {
-      strcpy(reply, "Usage: !app <app_name> <command>");
-      return true;
-    }
-
-    // Parse app_name and command (split at first space)
-    const char* app_name = app_data;
-    const char* app_command = strchr(app_data, ' ');
-
-    if (app_command == NULL) {
-      strcpy(reply, "Usage: !app <app_name> <command>");
-      return true;
-    }
-
-    // Copy app_name into a temporary buffer
-    char app_name_buf[64];
-    int app_name_len = app_command - app_name;
-    if (app_name_len >= sizeof(app_name_buf)) app_name_len = sizeof(app_name_buf) - 1;
-    memcpy(app_name_buf, app_name, app_name_len);
-    app_name_buf[app_name_len] = 0;
-
-    // Skip spaces after app_name
-    app_command++;
-    while (*app_command == ' ') app_command++;
-    if (*app_command == 0) {
-      strcpy(reply, "Usage: !app <app_name> <command>");
-      return true;
-    }
-
-    // Output JSON request for external app
-    Serial.print("{\"component\":\"app\",\"action\":\"request\",\"data\":{\"app_name\":\"");
-    Serial.print(app_name_buf);
-    Serial.print("\",\"command\":\"");
-    Serial.print(app_command);
-    Serial.print("\"},\"meta\":{\"user_pubkey\":\"");
-    mesh::Utils::printHex(Serial, client->id.pub_key, PUB_KEY_SIZE);
-    Serial.print("\",\"source\":\"mesh\",\"timestamp\":");
-    Serial.print(timestamp);
-    Serial.println("}}");
-
-    // Mark pending app request
-    int client_idx = client - acl.getClientByIdx(0);
-    pending_app_request_times[client_idx] = millis();
-
-    // Send immediate "Processing..." response to user
-    strcpy(reply, "Processing request...");
-    return true;
-  } else {
-    strcpy(reply, "Unknown command. Type !help for list.");
-  }
-
-  // Log response
-  printJSONSerialLog("app", "response", "command", NULL, reply,
-                     client->id.pub_key, "system", timestamp);
-
-  return true;  // Was a user command
+  return _user_cli->handleCommand(client, packet, command, reply);
 }
 
 void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, const uint8_t *secret,
@@ -972,7 +807,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _sd = nullptr;
   set_radio_at = revert_radio_at = 0;
   current_boot_sequence = 0;
-  system_msgs = new SystemMessageQueue();
+  system_msgs = new SystemMessageHandler();
+  _firmware_cli = new FirmwareCLI(this);
+  _user_cli = new UserCLI(this);
   clock_synced_once = false;
 
   // Network time sync initialisation
@@ -1765,6 +1602,152 @@ void MyMesh::printJSONSerialLog(const char* component, const char* action, const
   Serial.println("}}");
 }
 
+// FirmwareCLI helper methods
+void MyMesh::scheduleLazyWrite() {
+  dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+}
+
+bool MyMesh::checkBulletinRateLimit(char* reply) {
+  if (last_bulletin_time > 0 && millis() - last_bulletin_time < BULLETIN_RATE_LIMIT_MILLIS) {
+    uint32_t remaining = (BULLETIN_RATE_LIMIT_MILLIS / 1000) - ((millis() - last_bulletin_time) / 1000);
+    sprintf(reply, "ERROR: Rate limit hit. Wait %u seconds.", remaining);
+    return false;
+  }
+  return true;
+}
+
+void MyMesh::updateBulletinRateLimit() {
+  last_bulletin_time = millis();
+}
+
+void MyMesh::setNetsyncEnabled(bool enabled) {
+  netsync_config.enabled = enabled ? 1 : 0;
+  saveNetSyncConfig();
+}
+
+bool MyMesh::isNetsyncEnabled() const {
+  return netsync_config.enabled != 0;
+}
+
+void MyMesh::setNetsyncMaxwait(int mins) {
+  netsync_config.maxwait_mins = mins;
+  saveNetSyncConfig();
+}
+
+int MyMesh::getNetsyncMaxwait() const {
+  return netsync_config.maxwait_mins;
+}
+
+bool MyMesh::isClockSynced() const {
+  return clock_synced_once;
+}
+
+int MyMesh::getRepeaterCount() const {
+  return repeater_count;
+}
+
+bool MyMesh::isChannelPrivate() const {
+  return channel_config.mode_private;
+}
+
+int MyMesh::getLoginHistoryCount() const {
+  return login_history_count;
+}
+
+bool MyMesh::getLoginHistoryEntry(int idx, LoginHistoryEntry& entry) const {
+  if (idx < 0 || idx >= login_history_count) return false;
+  // Iterate backwards through circular buffer (newest first)
+  int buf_idx = (login_history_next_idx - 1 - idx + 5) % 5;
+  entry = login_history[buf_idx];
+  return true;
+}
+
+bool MyMesh::sendAppReply(const char* app_name, const uint8_t* pubkey, const char* response_text) {
+  // Find the client with this pubkey
+  ClientInfo* target_client = NULL;
+  int target_client_idx = -1;
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    auto c = acl.getClientByIdx(i);
+    if (memcmp(c->id.pub_key, pubkey, PUB_KEY_SIZE) == 0) {
+      target_client = c;
+      target_client_idx = i;
+      break;
+    }
+  }
+
+  if (!target_client) return false;
+
+  // Clear pending app request flag
+  pending_app_request_times[target_client_idx] = 0;
+
+  // Send response to user (matching user command reply format)
+  uint8_t temp[166];
+  uint32_t now = getRTCClock()->getCurrentTime();
+  memcpy(temp, &now, 4);  // timestamp
+  temp[4] = (TXT_TYPE_SIGNED_PLAIN << 2);  // Send as signed message
+  memcpy(&temp[5], self_id.pub_key, 4);    // Server identity prefix
+  strcpy((char*)&temp[9], response_text);
+
+  // Send reply
+  mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, target_client->id,
+                                     target_client->shared_secret,
+                                     temp, 9 + strlen((char*)&temp[9]) + 1);
+  if (pkt) {
+    if (target_client->out_path_len > 0) {
+      sendDirect(pkt, target_client->out_path, target_client->out_path_len, SERVER_RESPONSE_DELAY);
+    } else {
+      sendFlood(pkt, SERVER_RESPONSE_DELAY);
+    }
+  }
+
+  // Log to JSON (include app_name in the log)
+  Serial.print("{\"component\":\"app\",\"action\":\"response\",\"data\":{\"type\":\"data\",\"app_name\":\"");
+  Serial.print(app_name);
+  Serial.print("\",\"text\":\"");
+  Serial.print(response_text);
+  Serial.print("\"},\"meta\":{\"user_pubkey\":\"");
+  mesh::Utils::printHex(Serial, target_client->id.pub_key, PUB_KEY_SIZE);
+  Serial.print("\",\"source\":\"console\",\"timestamp\":");
+  Serial.print(getRTCClock()->getCurrentTime());
+  Serial.println("}}");
+
+  return true;
+}
+
+// UserCLI helper methods
+void MyMesh::logUserCommand(const char* action, const char* text, const uint8_t* user_pubkey, uint32_t timestamp) {
+  printJSONSerialLog("app", action, "command", NULL, text, user_pubkey, "mesh", timestamp);
+}
+
+void MyMesh::formatChannelKey(char* dest, size_t len) {
+  char* pos = dest;
+  size_t remaining = len;
+
+  if (channel_config.mode_private) {
+    // Channel mode is private - return secret key from config
+    for (int i = 0; i < CHANNEL_KEY_LEN && remaining > 3; i++) {
+      snprintf(pos, remaining, "%02X", channel_config.secret[i]);
+      pos += 2;
+      remaining -= 2;
+    }
+  } else {
+    // Channel mode is public - print node public key
+    for (int i = 0; i < CHANNEL_KEY_LEN && remaining > 3; i++) {
+      snprintf(pos, remaining, "%02X", self_id.pub_key[i]);
+      pos += 2;
+      remaining -= 2;
+    }
+  }
+  *pos = 0;
+}
+
+void MyMesh::markPendingAppRequest(ClientInfo* client) {
+  int client_idx = client - acl.getClientByIdx(0);
+  if (client_idx >= 0 && client_idx < MAX_CLIENTS) {
+    pending_app_request_times[client_idx] = millis();
+  }
+}
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply, ClientInfo* client) {
   while (*command == ' ')
     command++; // skip leading spaces
@@ -1775,279 +1758,20 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     command += 3;
   }
 
-  // Track command source for reply formatting
-  // Note: Admin access via mesh is already enforced at protocol level (TXT_TYPE_CLI_DATA check)
-  bool is_serial = (sender_timestamp == 0);
-
-  // handle ACL related commands
-  if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
-    char* hex = &command[8];
-    char* sp = strchr(hex, ' ');   // look for separator char
-    if (sp == NULL) {
-      strcpy(reply, "Err - bad params");
-    } else {
-      *sp++ = 0;   // replace space with null terminator
-
-      uint8_t pubkey[PUB_KEY_SIZE];
-      int hex_len = min(sp - hex, PUB_KEY_SIZE*2);
-      if (mesh::Utils::fromHex(pubkey, hex_len / 2, hex)) {
-        uint8_t perms = atoi(sp);
-        if (acl.applyPermissions(self_id, pubkey, hex_len / 2, perms)) {
-          dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);   // trigger acl.save()
-          strcpy(reply, "OK");
-        } else {
-          strcpy(reply, "Err - invalid params");
-        }
-      } else {
-        strcpy(reply, "Err - bad pubkey");
-      }
-    }
-  } else if (strcmp(command, "get acl") == 0) {
-    Serial.println("ACL:");
-    for (int i = 0; i < acl.getNumClients(); i++) {
-      auto c = acl.getClientByIdx(i);
-      if (c->permissions == 0) continue;  // skip deleted (or guest) entries
-
-      Serial.printf("%02X ", c->permissions);
-      mesh::Utils::printHex(Serial, c->id.pub_key, PUB_KEY_SIZE);
-      Serial.printf("\n");
-    }
-    reply[0] = 0;
-  } else if (memcmp(command, "bulletin.", 9) == 0) {
-    // Admin command (server admin can post bulletins via serial or over mesh)
-    if (isDesynced()) {
-      strcpy(reply, "ERROR: Clock not synced");
-    } else {
-      // Parse severity (format: bulletin.<severity> <message>)
-      const char* cmd_after_dot = &command[9];
-      PostSeverity severity;
-      const char* message_start;
-
-      if (strncmp(cmd_after_dot, "info ", 5) == 0) {
-        severity = SEVERITY_INFO;
-        message_start = cmd_after_dot + 5;
-      } else if (strncmp(cmd_after_dot, "warning ", 8) == 0) {
-        severity = SEVERITY_WARNING;
-        message_start = cmd_after_dot + 8;
-      } else if (strncmp(cmd_after_dot, "critical ", 9) == 0) {
-        severity = SEVERITY_CRITICAL;
-        message_start = cmd_after_dot + 9;
-      } else {
-        strcpy(reply, "ERROR: Invalid severity. Use bulletin.info|bulletin.warning|bulletin.critical");
-        return;
-      }
-
-      int text_len = strlen(message_start);
-      if (text_len == 0) {
-        strcpy(reply, "ERROR: Empty bulletin");
-      } else if (text_len > MAX_POST_TEXT_LEN) {
-        sprintf(reply, "ERROR: Max %d chars", MAX_POST_TEXT_LEN);
-      } else {
-        // Check rate limit
-        if (last_bulletin_time > 0 && millis() - last_bulletin_time < BULLETIN_RATE_LIMIT_MILLIS) {
-          uint32_t remaining = (BULLETIN_RATE_LIMIT_MILLIS / 1000) - ((millis() - last_bulletin_time) / 1000);
-          sprintf(reply, "ERROR: Rate limit hit. Wait %u seconds.", remaining);
-        } else {
-          addBulletin(message_start, severity);
-          last_bulletin_time = millis();
-          // Send confirmation to admin
-          if (is_serial) {
-            reply[0] = '\0';  // No reply for serial (JSON already output)
-          } else {
-            // Send confirmation to admin over mesh
-            const char* sev_name = (severity == SEVERITY_INFO) ? "INFO" :
-                                   (severity == SEVERITY_WARNING) ? "WARNING" : "CRITICAL";
-            sprintf(reply, "OK - %s bulletin posted", sev_name);
-          }
-        }
-      }
-    }
+  // Try firmware-specific CLI commands first
+  if (_firmware_cli->handleCommand(sender_timestamp, command, reply)) {
+    return;
   }
-  // Network time sync CLI commands
-  else if (memcmp(command, "set nettime.enable ", 19) == 0) {
-    const char* val = &command[19];
-    if (strcmp(val, "on") == 0) {
-      netsync_config.enabled = 1;
-      saveNetSyncConfig();
-      strcpy(reply, "OK - Network time sync enabled");
-    } else if (strcmp(val, "off") == 0) {
-      netsync_config.enabled = 0;
-      saveNetSyncConfig();
-      strcpy(reply, "OK - Network time sync disabled");
-    } else {
-      strcpy(reply, "Error: Use 'on' or 'off'");
-    }
-  } else if (strcmp(command, "get nettime.enable") == 0) {
-    strcpy(reply, netsync_config.enabled ? "on" : "off");
-  } else if (memcmp(command, "set nettime.maxwait ", 20) == 0) {
-    int mins = atoi(&command[20]);
-    if (mins >= 5 && mins <= 60) {
-      netsync_config.maxwait_mins = mins;
-      saveNetSyncConfig();
-      sprintf(reply, "OK - Max wait set to %d minutes", mins);
-    } else {
-      strcpy(reply, "Error: Range 5-60 minutes");
-    }
-  } else if (strcmp(command, "get nettime.maxwait") == 0) {
-    sprintf(reply, "%d", netsync_config.maxwait_mins);
-  } else if (strcmp(command, "get nettime.status") == 0) {
-    if (clock_synced_once || !isDesynced()) {
-      strcpy(reply, "Clock already synced");
-    } else if (!netsync_config.enabled) {
-      strcpy(reply, "Network time sync disabled");
-    } else {
-      sprintf(reply, "Waiting for repeaters (%d/3)", repeater_count);
-    }
-  }
-  // Broadcast channel CLI commands
-  else if (strcmp(command, "channel") == 0) {
-    // Display current channel mode
-    if (channel_config.mode_private) {
-      strcpy(reply, "Mode: private");
-    } else {
-      strcpy(reply, "Mode: public");
-    }
-  } else if (strcmp(command, "channel public") == 0) {
-    // Switch to public mode
-    setChannelModePublic();
-    strcpy(reply, "OK - Switched to public mode");
-  } else if (strcmp(command, "channel private") == 0) {
-    // Switch to private mode
-    setChannelModePrivate();
-    reply[0] = '\0';  // No plaintext reply (JSON already output with secret)
-  } else if (strcmp(command, "login.history") == 0) {
-    // Display last 5 logins (admin only)
-    if (login_history_count == 0) {
-      strcpy(reply, "No login history available");
-    } else {
-      // Build reply with last N logins (newest first)
-      reply[0] = '\0';
-      strcat(reply, "Last ");
-      char count_str[4];
-      sprintf(count_str, "%d", login_history_count);
-      strcat(reply, count_str);
-      strcat(reply, " logins:\n");
 
-      // Iterate backwards through circular buffer (newest first)
-      for (int i = 0; i < login_history_count; i++) {
-        int idx = (login_history_next_idx - 1 - i + 5) % 5;
-        auto& entry = login_history[idx];
+  // Fall through to common CLI commands
+  bool was_desynced = isDesynced();
+  _cli.handleCommand(sender_timestamp, command, reply);
 
-        // Format: [PUBKEY] ROLE - TIMESTAMP
-        char line[100];
-        const char* role = (entry.permissions == PERM_ACL_ADMIN) ? "admin" :
-                          (entry.permissions == PERM_ACL_READ_WRITE) ? "user" : "guest";
-
-        // Format timestamp using RTC
-        char timestamp_str[32];
-        DateTime dt(entry.timestamp);
-        sprintf(timestamp_str, "%02d/%02d/%04d %02d:%02d:%02d UTC",
-                dt.day(), dt.month(), dt.year(),
-                dt.hour(), dt.minute(), dt.second());
-
-        sprintf(line, "[%02X%02X%02X%02X] %s - %s\n",
-                entry.pub_key[0], entry.pub_key[1], entry.pub_key[2], entry.pub_key[3],
-                role, timestamp_str);
-        strcat(reply, line);
-      }
-    }
-  } else if (memcmp(command, "appreply ", 9) == 0) {
-    // External application reply - send response to user
-    // Format: appreply <app_name> <pubkey_hex> <response_text>
-    char* app_name = &command[9];
-    char* hex = strchr(app_name, ' ');   // look for first separator
-    if (hex == NULL) {
-      strcpy(reply, "ERROR: Bad format. Use: appreply <app_name> <pubkey_hex> <response_text>");
-    } else {
-      *hex++ = 0;   // null terminate app_name, hex now points to pubkey_hex
-
-      char* response_text = strchr(hex, ' ');   // look for second separator
-      if (response_text == NULL) {
-        strcpy(reply, "ERROR: Bad format. Use: appreply <app_name> <pubkey_hex> <response_text>");
-      } else {
-        *response_text++ = 0;   // null terminate hex, response_text now points to response
-
-        uint8_t pubkey[PUB_KEY_SIZE];
-        int hex_len = strlen(hex);
-        if (hex_len == PUB_KEY_SIZE * 2 && mesh::Utils::fromHex(pubkey, PUB_KEY_SIZE, hex)) {
-          // Find the client with this pubkey
-          ClientInfo* target_client = NULL;
-          int target_client_idx = -1;
-          for (int i = 0; i < acl.getNumClients(); i++) {
-            auto c = acl.getClientByIdx(i);
-            if (memcmp(c->id.pub_key, pubkey, PUB_KEY_SIZE) == 0) {
-              target_client = c;
-              target_client_idx = i;
-              break;
-            }
-          }
-
-          if (target_client) {
-            // Clear pending app request flag
-            pending_app_request_times[target_client_idx] = 0;
-
-            // Send response to user (matching user command reply format)
-            uint8_t temp[166];
-            uint32_t now = getRTCClock()->getCurrentTime();
-            memcpy(temp, &now, 4);  // timestamp
-            temp[4] = (TXT_TYPE_SIGNED_PLAIN << 2);  // Send as signed message
-            memcpy(&temp[5], self_id.pub_key, 4);    // Server identity prefix
-            strcpy((char*)&temp[9], response_text);
-
-            // Send reply
-            mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, target_client->id,
-                                               target_client->shared_secret,
-                                               temp, 9 + strlen((char*)&temp[9]) + 1);
-            if (pkt) {
-              if (target_client->out_path_len > 0) {
-                sendDirect(pkt, target_client->out_path, target_client->out_path_len, SERVER_RESPONSE_DELAY);
-              } else {
-                sendFlood(pkt, SERVER_RESPONSE_DELAY);
-              }
-            }
-
-            // Log to JSON (include app_name in the log)
-            Serial.print("{\"component\":\"app\",\"action\":\"response\",\"data\":{\"type\":\"data\",\"app_name\":\"");
-            Serial.print(app_name);
-            Serial.print("\",\"text\":\"");
-            Serial.print(response_text);
-            Serial.print("\"},\"meta\":{\"user_pubkey\":\"");
-            mesh::Utils::printHex(Serial, target_client->id.pub_key, PUB_KEY_SIZE);
-            Serial.print("\",\"source\":\"console\",\"timestamp\":");
-            Serial.print(getRTCClock()->getCurrentTime());
-            Serial.println("}}");
-
-            strcpy(reply, "OK - Response sent");
-          } else {
-            strcpy(reply, "ERROR: Client not found");
-          }
-        } else {
-          strcpy(reply, "ERROR: Invalid pubkey hex");
-        }
-      }
-    }
-  }
-  // SD card commands
-  else if (strcmp(command, "erase.sdcard") == 0) {
-    if (_sd && _sd->isReady()) {
-      if (_sd->eraseAllData()) {
-        strcpy(reply, "OK - SD card data erased");
-      } else {
-        strcpy(reply, "ERROR: Erase failed");
-      }
-    } else {
-      strcpy(reply, "ERROR: SD card not available");
-    }
-  } else {
-    bool was_desynced = isDesynced();
-    _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
-
-    // If clock was desynced and now isn't, notify clock sync
-    if (was_desynced && !isDesynced()) {
-      notifyClockSynced(NULL);  // NULL = manual sync via CLI
-      // Schedule immediate post sync check to push any pending posts
-      next_push = 0;
-    }
+  // If clock was desynced and now isn't, notify clock sync
+  if (was_desynced && !isDesynced()) {
+    notifyClockSynced(NULL);  // NULL = manual sync via CLI
+    // Schedule immediate post sync check to push any pending posts
+    next_push = 0;
   }
 }
 

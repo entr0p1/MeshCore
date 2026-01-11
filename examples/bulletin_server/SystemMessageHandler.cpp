@@ -1,8 +1,8 @@
-#include "SystemMessageQueue.h"
+#include "SystemMessageHandler.h"
 #include "MyMesh.h"
 #include <helpers/TxtDataHelpers.h>
 
-void SystemMessageQueue::load(FILESYSTEM* fs) {
+void SystemMessageHandler::load(FILESYSTEM* fs) {
   num_messages = 0;
 
   if (!fs->exists("/system_msgs")) return;
@@ -28,7 +28,7 @@ void SystemMessageQueue::load(FILESYSTEM* fs) {
   }
 }
 
-void SystemMessageQueue::save(FILESYSTEM* fs) {
+void SystemMessageHandler::save(FILESYSTEM* fs) {
   File file = MyMesh::openFileForWrite(fs, "/system_msgs");
   if (file) {
     file.write((uint8_t*)&num_messages, 1);
@@ -45,7 +45,7 @@ void SystemMessageQueue::save(FILESYSTEM* fs) {
   }
 }
 
-void SystemMessageQueue::addMessage(const char* text, uint32_t boot_seq) {
+void SystemMessageHandler::addMessage(const char* text, uint32_t boot_seq) {
   if (num_messages >= MAX_SYSTEM_MESSAGES) {
     // Evict oldest message (lowest boot_sequence, or lowest millis if same boot)
     int oldest_idx = 0;
@@ -71,12 +71,12 @@ void SystemMessageQueue::addMessage(const char* text, uint32_t boot_seq) {
   memset(msg->delivered_to, 0, sizeof(msg->delivered_to));
 
   // Print the message creation to Serial with message ID
-  Serial.printf("SystemMessageQueue: Message %d queued: %s\n", num_messages, text);
+  Serial.printf("SystemMessageHandler: Message %d queued: %s\n", num_messages, text);
 
   num_messages++;
 }
 
-bool SystemMessageQueue::needsPush(int msg_idx, const ClientInfo* admin) {
+bool SystemMessageHandler::needsPush(int msg_idx, const ClientInfo* admin) {
   if (msg_idx >= num_messages) {
     MESH_DEBUG_PRINTLN("    needsPush: msg_idx %d >= num_messages %d", msg_idx, num_messages);
     return false;
@@ -108,7 +108,7 @@ bool SystemMessageQueue::needsPush(int msg_idx, const ClientInfo* admin) {
   return true;  // Not yet delivered
 }
 
-void SystemMessageQueue::markPushed(int msg_idx, const ClientInfo* admin) {
+void SystemMessageHandler::markPushed(int msg_idx, const ClientInfo* admin) {
   if (msg_idx >= num_messages) return;
 
   auto msg = &messages[msg_idx];
@@ -123,7 +123,7 @@ void SystemMessageQueue::markPushed(int msg_idx, const ClientInfo* admin) {
   }
 }
 
-void SystemMessageQueue::cleanup(const ClientACL* acl) {
+void SystemMessageHandler::cleanup(const ClientACL* acl) {
   // Remove messages that have been delivered to ALL current admins
   for (int i = 0; i < num_messages; ) {
     bool delivered_to_all = true;
