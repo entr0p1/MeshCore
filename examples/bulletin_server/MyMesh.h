@@ -213,7 +213,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void trackLogin(const uint8_t* pub_key, uint8_t permissions, uint32_t timestamp);
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
-  bool isFlashConfigUsable(const char* filename, size_t min_size) const;
+  bool isFlashConfigUsable(const char* filename, size_t min_size, size_t size_alignment = 0) const;
+  int getClientIndex(const ClientInfo* client) const;
   void restoreConfigFromSDIfNeeded();
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   void savePosts();
@@ -352,6 +353,7 @@ public:
   void logUserCommand(const char* action, const char* text, const uint8_t* user_pubkey, uint32_t timestamp);
   void formatChannelKey(char* dest, size_t len);
   void markPendingAppRequest(ClientInfo* client);
+  bool hasPendingAppRequest(const ClientInfo* client) const;
 };
 
 extern MyMesh the_mesh;

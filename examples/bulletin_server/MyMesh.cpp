@@ -236,8 +236,9 @@ void MyMesh::eraseLogFile() {
 }
 
 static const size_t kCommonPrefsMinSize = 170;
+static const size_t kContactsRecordSize = PUB_KEY_SIZE + 1 + 4 + 2 + 1 + MAX_PATH_SIZE + PUB_KEY_SIZE;
 
-bool MyMesh::isFlashConfigUsable(const char* filename, size_t min_size) const {
+bool MyMesh::isFlashConfigUsable(const char* filename, size_t min_size, size_t size_alignment) const {
   if (!_store || !_store->exists(filename)) {
     return false;
   }
@@ -247,7 +248,13 @@ bool MyMesh::isFlashConfigUsable(const char* filename, size_t min_size) const {
     return false;
   }
 
-  if (min_size > 0 && file.size() < min_size) {
+  size_t file_size = file.size();
+  if (min_size > 0 && file_size < min_size) {
+    file.close();
+    return false;
+  }
+
+  if (size_alignment > 0 && (file_size % size_alignment) != 0) {
     file.close();
     return false;
   }
@@ -269,7 +276,7 @@ void MyMesh::restoreConfigFromSDIfNeeded() {
   if (!isFlashConfigUsable("/com_prefs", kCommonPrefsMinSize)) {
     _store->restoreFromSD("/com_prefs");
   }
-  if (!isFlashConfigUsable("/s_contacts", 0)) {
+  if (!isFlashConfigUsable("/s_contacts", 0, kContactsRecordSize)) {
     _store->restoreFromSD("/s_contacts");
   }
   if (!isFlashConfigUsable("/channel_cfg", sizeof(BulletinChannelConfig))) {
@@ -435,16 +442,18 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     data[len] = 0;                                        // ensure null terminator
 
     ClientInfo* client = NULL;
+    uint8_t perm = 0;
     if (data[8] == 0 && !_prefs.allow_read_only) {   // blank password, just check if sender is in ACL
       client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
       if (client == NULL) {
       #if MESH_DEBUG
         MESH_DEBUG_PRINTLN("Login, sender not in ACL");
       #endif
+      } else {
+        perm = client->permissions;
       }
     }
     if (client == NULL) {
-      uint8_t perm;
       if (strcmp((char *)&data[8], _prefs.password) == 0) { // check for valid admin password
         perm = PERM_ACL_ADMIN;
       } else {
@@ -457,75 +466,75 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
           return; // no response. Client will timeout
         }
       }
-
-      // Clock synchronisation from admin login
-      MESH_DEBUG_PRINTLN("Login: perm=%d, isDesynced=%d, clock_synced_once=%d, sender_ts=%lu",
-                         perm, isDesynced(), clock_synced_once, sender_timestamp);
-      if (perm == PERM_ACL_ADMIN && isDesynced() && !clock_synced_once) {
-        if (sender_timestamp >= MIN_VALID_TIMESTAMP) {
-          getRTCClock()->setCurrentTime(sender_timestamp);
-          notifyClockSynced(sender.pub_key);
-
-          // Schedule immediate post sync check to push any pending posts
-          next_push = 0;
-
-          // Clear repeater buffer - admin sync takes precedence
-          repeater_count = 0;
-          check_netsync_flag = false;
-
-          MESH_DEBUG_PRINTLN("Clock synced from admin login %02X%02X: %lu",
-                            sender.pub_key[0], sender.pub_key[1],
-                            sender_timestamp);
-        } else {
-          MESH_DEBUG_PRINTLN("Admin login but timestamp %lu < MIN_VALID %lu", sender_timestamp, MIN_VALID_TIMESTAMP);
-        }
-      }
-
-      client = acl.putClient(sender, 0);  // add to known clients (if not already known)
-      if (sender_timestamp <= client->last_timestamp) {
-        MESH_DEBUG_PRINTLN("possible replay attack!");
-        return;
-      }
-
-      MESH_DEBUG_PRINTLN("Login success!");
-      client->last_timestamp = sender_timestamp;
-      client->extra.room.sync_since = sender_sync_since;
-      client->extra.room.pending_ack = 0;
-      client->extra.room.push_failures = 0;
-
-      client->last_activity = getRTCClock()->getCurrentTime();
-      client->permissions |= perm;
-      memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
-
-      // Print login message for all users (with role)
-      const char* role = client->isAdmin() ? "admin" : "user";
-      Serial.printf("MyMesh: User login: [%02X%02X%02X%02X] (%s)\n",
-                    (uint32_t)client->id.pub_key[0],
-                    (uint32_t)client->id.pub_key[1],
-                    (uint32_t)client->id.pub_key[2],
-                    (uint32_t)client->id.pub_key[3],
-                    role);
-
-      // Track login in history
-      trackLogin(client->id.pub_key, perm, client->last_activity);
-
-      // Reset pre-login attempts for all system messages when admin logs in
-      // (they're now active, so normal delivery tracking applies)
-      int client_idx = -1;
-      for (int i = 0; i < acl.getNumClients(); i++) {
-        if (acl.getClientByIdx(i) == client) {
-          client_idx = i;
-          break;
-        }
-      }
-      if (client_idx >= 0 && client->isAdmin()) {
-        memset(system_msg_prelogin_attempts[client_idx], 0, sizeof(system_msg_prelogin_attempts[client_idx]));
-        MESH_DEBUG_PRINTLN("Admin %02X logged in, reset pre-login attempts", (uint32_t)client->id.pub_key[0]);
-        // Note: Delivery attempts will be logged as they occur in the main loop
-      }
-
-      dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
     }
+
+    // Clock synchronisation from admin login
+    MESH_DEBUG_PRINTLN("Login: perm=%d, isDesynced=%d, clock_synced_once=%d, sender_ts=%lu",
+                       perm, isDesynced(), clock_synced_once, sender_timestamp);
+    if ((perm & PERM_ACL_ROLE_MASK) == PERM_ACL_ADMIN && isDesynced() && !clock_synced_once) {
+      if (sender_timestamp >= MIN_VALID_TIMESTAMP) {
+        getRTCClock()->setCurrentTime(sender_timestamp);
+        notifyClockSynced(sender.pub_key);
+
+        // Schedule immediate post sync check to push any pending posts
+        next_push = 0;
+
+        // Clear repeater buffer - admin sync takes precedence
+        repeater_count = 0;
+        check_netsync_flag = false;
+
+        MESH_DEBUG_PRINTLN("Clock synced from admin login %02X%02X: %lu",
+                          sender.pub_key[0], sender.pub_key[1],
+                          sender_timestamp);
+      } else {
+        MESH_DEBUG_PRINTLN("Admin login but timestamp %lu < MIN_VALID %lu", sender_timestamp, MIN_VALID_TIMESTAMP);
+      }
+    }
+
+    client = acl.putClient(sender, 0);  // add to known clients (if not already known)
+    if (sender_timestamp <= client->last_timestamp) {
+      MESH_DEBUG_PRINTLN("possible replay attack!");
+      return;
+    }
+
+    MESH_DEBUG_PRINTLN("Login success!");
+    client->last_timestamp = sender_timestamp;
+    client->extra.room.sync_since = sender_sync_since;
+    client->extra.room.pending_ack = 0;
+    client->extra.room.push_failures = 0;
+
+    client->last_activity = getRTCClock()->getCurrentTime();
+    client->permissions |= perm;
+    memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
+
+    // Print login message for all users (with role)
+    const char* role = client->isAdmin() ? "admin" : "user";
+    Serial.printf("MyMesh: User login: [%02X%02X%02X%02X] (%s)\n",
+                  (uint32_t)client->id.pub_key[0],
+                  (uint32_t)client->id.pub_key[1],
+                  (uint32_t)client->id.pub_key[2],
+                  (uint32_t)client->id.pub_key[3],
+                  role);
+
+    // Track login in history
+    trackLogin(client->id.pub_key, perm, client->last_activity);
+
+    // Reset pre-login attempts for all system messages when admin logs in
+    // (they're now active, so normal delivery tracking applies)
+    int client_idx = -1;
+    for (int i = 0; i < acl.getNumClients(); i++) {
+      if (acl.getClientByIdx(i) == client) {
+        client_idx = i;
+        break;
+      }
+    }
+    if (client_idx >= 0 && client->isAdmin()) {
+      memset(system_msg_prelogin_attempts[client_idx], 0, sizeof(system_msg_prelogin_attempts[client_idx]));
+      MESH_DEBUG_PRINTLN("Admin %02X logged in, reset pre-login attempts", (uint32_t)client->id.pub_key[0]);
+      // Note: Delivery attempts will be logged as they occur in the main loop
+    }
+
+    dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
 
     uint32_t now = getRTCClock()->getCurrentTimeUnique();
     memcpy(reply_data, &now, 4); // response packets always prefixed with timestamp
@@ -1793,11 +1802,28 @@ void MyMesh::formatChannelKey(char* dest, size_t len) {
   *pos = 0;
 }
 
+int MyMesh::getClientIndex(const ClientInfo* client) const {
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    if (acl.getClientByIdx(i) == client) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 void MyMesh::markPendingAppRequest(ClientInfo* client) {
-  int client_idx = client - acl.getClientByIdx(0);
+  int client_idx = getClientIndex(client);
   if (client_idx >= 0 && client_idx < MAX_CLIENTS) {
     pending_app_request_times[client_idx] = millis();
   }
+}
+
+bool MyMesh::hasPendingAppRequest(const ClientInfo* client) const {
+  int client_idx = getClientIndex(client);
+  if (client_idx < 0 || client_idx >= MAX_CLIENTS) {
+    return false;
+  }
+  return pending_app_request_times[client_idx] != 0;
 }
 
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply, ClientInfo* client) {
@@ -2165,12 +2191,32 @@ void MyMesh::loadPosts() {
     uint8_t text_len;
     if (f.read(&text_len, 1) != 1) break;
 
-    if (text_len > 0 && text_len <= MAX_POST_TEXT_LEN) {
-      if (f.read((uint8_t*)p->text, text_len) != text_len) break;
-      p->text[text_len] = '\0';
+    size_t max_text_len = sizeof(p->text) - 1;
+    bool read_ok = true;
+    if (text_len > 0) {
+      if (text_len <= max_text_len) {
+        read_ok = (f.read((uint8_t*)p->text, text_len) == text_len);
+        if (read_ok) {
+          p->text[text_len] = '\0';
+        }
+      } else {
+        size_t remaining = text_len;
+        uint8_t discard[32];
+        while (remaining > 0) {
+          size_t chunk = remaining > sizeof(discard) ? sizeof(discard) : remaining;
+          int bytes_read = f.read(discard, chunk);
+          if (bytes_read != (int)chunk) {
+            read_ok = false;
+            break;
+          }
+          remaining -= chunk;
+        }
+        p->text[0] = '\0';
+      }
     } else {
       p->text[0] = '\0';
     }
+    if (!read_ok) break;
   }
 
   f.close();

@@ -164,6 +164,11 @@ bool UserCLI::cmdApp(ClientInfo* client, const char* args, char* reply) {
     return false;  // Let caller log the response
   }
 
+  if (_mesh->hasPendingAppRequest(client)) {
+    strcpy(reply, "Request already pending. Wait for a response.");
+    return false;  // Let caller log the response
+  }
+
   // Output JSON request for external app
   Serial.print("{\"component\":\"app\",\"action\":\"request\",\"data\":{\"app_name\":\"");
   Serial.print(app_name_buf);

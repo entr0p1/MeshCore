@@ -8,7 +8,7 @@ class MyMesh;
 struct ClientInfo;
 
 // Max reply size for user commands
-#define MAX_USER_REPLY_SIZE 160
+#define MAX_USER_REPLY_SIZE 157
 
 /**
  * User CLI - handles ! prefixed user commands
