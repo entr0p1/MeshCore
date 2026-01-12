@@ -1,6 +1,8 @@
 #include "UITask.h"
 #include <helpers/TxtDataHelpers.h>
 #include "MyMesh.h"
+#include "DataStore.h"
+#include "SDStorage.h"
 #include "target.h"
 
 #ifndef AUTO_OFF_MILLIS
@@ -15,6 +17,22 @@
 
 #define LONG_PRESS_MILLIS   1200
 
+#ifndef UI_RECENT_LIST_SIZE
+  #define UI_RECENT_LIST_SIZE 4
+#endif
+
+#if UI_HAS_JOYSTICK
+  #define PRESS_LABEL "press Enter"
+#else
+  #define PRESS_LABEL "long press"
+#endif
+
+// UI Layout constants
+#define UI_HEADER_Y         0     // Title row
+#define UI_PAGE_DOTS_Y      12    // Page indicator dots
+#define UI_CONTENT_START_Y  18    // First content line after page dots
+#define UI_LINE_HEIGHT      10    // Spacing between content lines
+
 #ifndef BATTERY_MIN_MILLIVOLTS
   #define BATTERY_MIN_MILLIVOLTS 3000
 #endif
@@ -28,37 +46,8 @@
 
 #include "icons.h"
 
-// Helper: Calculate battery percentage from millivolts
-static int getBatteryPercentage(uint16_t millivolts) {
-  int percentage = ((millivolts - BATTERY_MIN_MILLIVOLTS) * 100) /
-                   (BATTERY_MAX_MILLIVOLTS - BATTERY_MIN_MILLIVOLTS);
-  if (percentage < 0) percentage = 0;
-  if (percentage > 100) percentage = 100;
-  return percentage;
-}
-
-// Helper: Render battery indicator at top-right of display
-static void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
-  int batteryPercentage = getBatteryPercentage(batteryMilliVolts);
-
-  // Battery icon dimensions
-  const int iconWidth = 24;
-  const int iconHeight = 10;
-  const int iconX = display.width() - iconWidth - 5;
-  const int iconY = 0;
-
-  display.setColor(DisplayDriver::GREEN);
-
-  // Battery outline
-  display.drawRect(iconX, iconY, iconWidth, iconHeight);
-
-  // Battery "cap"
-  display.fillRect(iconX + iconWidth, iconY + (iconHeight / 4), 3, iconHeight / 2);
-
-  // Fill the battery based on percentage
-  int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
-  display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
-}
+// Forward declaration
+class HomeScreen;
 
 class SplashScreen : public UIScreen {
   UITask* _task;
@@ -98,79 +87,170 @@ public:
 
   void poll() override {
     if (millis() >= dismiss_after) {
-      _task->gotoStatusScreen();
+      _task->gotoHomeScreen();
     }
   }
 };
 
-class StatusScreen : public UIScreen {
+class HomeScreen : public UIScreen {
+  enum HomePage {
+    STATUS,
+    NODEINFO,
+    RADIOINFO,
+    ADVERT,
+#if ENV_INCLUDE_GPS == 1
+    GPS,
+#endif
+#if UI_SENSORS_PAGE == 1
+    SENSORS,
+#endif
+    ALARM,
+    SHUTDOWN,
+    MSG_BASE    // Messages start here (dynamic pages)
+  };
+
   UITask* _task;
-  NodePrefs* _node_prefs;
   mesh::RTCClock* _rtc;
-  int _page_count;
+  SensorManager* _sensors;
+  NodePrefs* _node_prefs;
+  uint8_t _page;
 
-public:
-  StatusScreen(UITask* task, NodePrefs* node_prefs, mesh::RTCClock* rtc)
-     : _task(task), _node_prefs(node_prefs), _rtc(rtc), _page_count(1) { }
+  // Deferred action flags (wait for button release)
+  bool _shutdown_init;
+  bool _advert_init;
+  bool _alarm_init;
+  bool _gps_toggle_init;
 
-  void setPageCount(int count) { _page_count = count; }
+  // Sensor data
+  CayenneLPP sensors_lpp;
+  int sensors_nb;
+  bool sensors_scroll;
+  int sensors_scroll_offset;
+  unsigned long next_sensors_refresh;
 
-  int render(DisplayDriver& display) override {
-    char tmp[80];
+  // Helper: Calculate battery percentage from millivolts
+  static int getBatteryPercentage(uint16_t millivolts) {
+    int percentage = ((millivolts - BATTERY_MIN_MILLIVOLTS) * 100) /
+                     (BATTERY_MAX_MILLIVOLTS - BATTERY_MIN_MILLIVOLTS);
+    if (percentage < 0) percentage = 0;
+    if (percentage > 100) percentage = 100;
+    return percentage;
+  }
 
-    // Title: "Node Status"
-    display.setTextSize(1);
-    display.setColor(DisplayDriver::GREEN);
-    display.setCursor(0, 0);
-    display.print("Node Status");
-
-    // Battery indicator
-    renderBatteryIndicator(display, _task->getBattMilliVolts());
-
-    // Page dots - centred at y=12, showing this is page 0
-    int y = 12;
-    int x_start = (display.width() - (_page_count * 10)) / 2;
-    for (int i = 0; i < _page_count; i++) {
+  // Helper: Render page indicator dots
+  void renderPageDots(DisplayDriver& display, int page_count, int current_page) {
+    int x_start = (display.width() - (page_count * 10)) / 2;
+    for (int i = 0; i < page_count; i++) {
       int x = x_start + (i * 10);
-      if (i == 0) {  // Current page (status is first)
-        display.fillRect(x-1, y-1, 3, 3);
+      if (i == current_page) {
+        display.fillRect(x-1, UI_PAGE_DOTS_Y-1, 3, 3);
       } else {
-        display.fillRect(x, y, 1, 1);
+        display.fillRect(x, UI_PAGE_DOTS_Y, 1, 1);
       }
     }
+  }
 
-    // Status info
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
+  // Helper: Render battery indicator at top-right of display
+  void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
+    int batteryPercentage = getBatteryPercentage(batteryMilliVolts);
 
-    // Lines 1-2: Node name (2 lines to prevent wrapping)
-    char filtered_name[sizeof(_node_prefs->node_name)];
-    display.translateUTF8ToBlocks(filtered_name, _node_prefs->node_name, sizeof(filtered_name));
+    // Battery icon dimensions
+    const int iconWidth = 24;
+    const int iconHeight = 10;
+    const int iconX = display.width() - iconWidth - 5;
+    const int iconY = 0;
 
-    // Calculate max characters per line (128 pixels / 6 pixels per char = 21 chars)
-    const int chars_per_line = 21;
-    const char* prefix = "Node: ";
-    int prefix_len = strlen(prefix);
-    int name_len = strlen(filtered_name);
+    display.setColor(DisplayDriver::GREEN);
 
-    // Line 1: "Node: <first part>"
-    display.setCursor(0, 18);
-    if (name_len <= chars_per_line - prefix_len) {
-      // Name fits on one line
-      sprintf(tmp, "%s%s", prefix, filtered_name);
-      display.print(tmp);
-    } else {
-      // Name needs 2 lines - print first part
-      int first_line_chars = chars_per_line - prefix_len;
-      sprintf(tmp, "%s%.*s", prefix, first_line_chars, filtered_name);
-      display.print(tmp);
+    // Battery outline
+    display.drawRect(iconX, iconY, iconWidth, iconHeight);
 
-      // Line 2: Continue name
-      display.setCursor(0, 29);
-      display.print(&filtered_name[first_line_chars]);
+    // Battery "cap"
+    display.fillRect(iconX + iconWidth, iconY + (iconHeight / 4), 3, iconHeight / 2);
+
+    // Fill the battery based on percentage
+    int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
+    display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
+  }
+
+  void refresh_sensors() {
+    if (millis() > next_sensors_refresh) {
+      sensors_lpp.reset();
+      sensors_nb = 0;
+      sensors_lpp.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+      if (_sensors != NULL) {
+        _sensors->querySensors(0xFF, sensors_lpp);
+      }
+      LPPReader reader(sensors_lpp.getBuffer(), sensors_lpp.getSize());
+      uint8_t channel, type;
+      while(reader.readHeader(channel, type)) {
+        reader.skipData(type);
+        sensors_nb++;
+      }
+      sensors_scroll = sensors_nb > UI_RECENT_LIST_SIZE;
+#if AUTO_OFF_MILLIS > 0
+      next_sensors_refresh = millis() + 5000;
+#else
+      next_sensors_refresh = millis() + 60000;
+#endif
     }
+  }
 
-    // Line 3: ACL counts (moved down to y=40, efficiently count in one pass)
+  int getMessageCount() {
+    const PostInfo* posts[MAX_DISPLAY_MSGS];
+    return the_mesh.getRecentPosts(posts, MAX_DISPLAY_MSGS);
+  }
+
+  int getPageCount() {
+    return MSG_BASE + getMessageCount();
+  }
+
+  // Page-specific render methods
+  void renderStatusPage(DisplayDriver& display) {
+    char tmp[80];
+    display.setColor(DisplayDriver::YELLOW);
+    int y = UI_CONTENT_START_Y;
+
+    // Node name (may contain UTF8, may be long)
+    snprintf(tmp, sizeof(tmp), "Node: %s", _node_prefs->node_name);
+    char filtered[sizeof(tmp)];
+    display.translateUTF8ToBlocks(filtered, tmp, sizeof(filtered));
+    display.drawTextEllipsized(0, y, display.width(), filtered);
+    y += (UI_LINE_HEIGHT * 2);
+
+    // SD card status
+    char sd_str[24];
+    SDStorage* sd = the_mesh.getDataStore()->getSD();
+    if (sd) {
+      sd->formatStorageString(sd_str, sizeof(sd_str));
+    } else {
+      strncpy(sd_str, "Unsupported", sizeof(sd_str));
+      sd_str[sizeof(sd_str) - 1] = '\0';
+    }
+    snprintf(tmp, sizeof(tmp), "SD: %s", sd_str);
+    display.drawTextEllipsized(0, y, display.width(), tmp);
+    y += UI_LINE_HEIGHT;
+
+    // Clock status
+    if (!the_mesh.isDesynced()) {
+      uint32_t current_time = _rtc->getCurrentTime();
+      DateTime dt = DateTime(current_time);
+      snprintf(tmp, sizeof(tmp), "Clk:%02d/%02d/%02d %02d:%02d",
+               dt.day(), dt.month(), dt.year() % 100,
+               dt.hour(), dt.minute());
+    } else {
+      snprintf(tmp, sizeof(tmp), "Clock: NOT SYNCED");
+    }
+    display.setCursor(0, y);
+    display.print(tmp);
+  }
+
+  void renderNodeInfoPage(DisplayDriver& display) {
+    char tmp[80];
+    display.setColor(DisplayDriver::YELLOW);
+    int y = UI_CONTENT_START_Y;
+
+    // ACL counts
     int admin_count = 0, rw_count = 0, ro_count = 0;
     ClientACL* acl = the_mesh.getACL();
     int num_clients = acl->getNumClients();
@@ -181,197 +261,246 @@ public:
       else if (role == PERM_ACL_READ_WRITE) rw_count++;
       else if (role == PERM_ACL_READ_ONLY) ro_count++;
     }
-
-    display.setCursor(0, 40);
-    sprintf(tmp, "ACL: %dA/%dRW/%dR", admin_count, rw_count, ro_count);
+    snprintf(tmp, sizeof(tmp), "ACL: %dA/%dRW/%dR", admin_count, rw_count, ro_count);
+    display.setCursor(0, y);
     display.print(tmp);
+    y += UI_LINE_HEIGHT;
 
-    // Line 4: Clock status with full date/time or NOT SYNCED
-    bool synced = !the_mesh.isDesynced();
-    display.setCursor(0, 51);
-    if (synced) {
-      uint32_t current_time = _rtc->getCurrentTime();
-      DateTime dt = DateTime(current_time);
-      sprintf(tmp, "Clk:%02d/%02d/%02d %02d:%02d",
-              dt.day(), dt.month(), dt.year() % 100,
-              dt.hour(), dt.minute());
-    } else {
-      sprintf(tmp, "Clock: NOT SYNCED");
-    }
+    // Firmware version
+    snprintf(tmp, sizeof(tmp), "FW Version: %s", FIRMWARE_VERSION);
+    display.setCursor(0, y);
     display.print(tmp);
+    y += UI_LINE_HEIGHT;
 
-    return 5000;
+    // MeshCore version
+    snprintf(tmp, sizeof(tmp), "MC Version: %s", MESHCORE_VERSION);
+    display.setCursor(0, y);
+    display.print(tmp);
   }
 
-  bool handleInput(char c) override {
-    if (c == KEY_NEXT || c == KEY_RIGHT) {
-      _task->gotoRadioConfigScreen();
-      return true;
-    }
-    return false;
-  }
-};
-
-class RadioConfigScreen : public UIScreen {
-  UITask* _task;
-  NodePrefs* _node_prefs;
-  int _page_count;
-
-public:
-  RadioConfigScreen(UITask* task, NodePrefs* node_prefs)
-     : _task(task), _node_prefs(node_prefs), _page_count(1) { }
-
-  void setPageCount(int count) { _page_count = count; }
-
-  int render(DisplayDriver& display) override {
+  void renderRadioInfoPage(DisplayDriver& display) {
     char tmp[80];
-
-    // Title: "Radio Config"
-    display.setTextSize(1);
-    display.setColor(DisplayDriver::GREEN);
-    display.setCursor(0, 0);
-    display.print("Radio Config");
-
-    // Battery indicator
-    renderBatteryIndicator(display, _task->getBattMilliVolts());
-
-    // Page dots - centred at y=12, showing this is page 1
-    int y = 12;
-    int x_start = (display.width() - (_page_count * 10)) / 2;
-    for (int i = 0; i < _page_count; i++) {
-      int x = x_start + (i * 10);
-      if (i == 1) {  // Current page (radio config is second)
-        display.fillRect(x-1, y-1, 3, 3);
-      } else {
-        display.fillRect(x, y, 1, 1);
-      }
-    }
-
-    // Radio info page
     display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
+    int y = UI_CONTENT_START_Y;
 
-    display.setCursor(0, 18);
-    sprintf(tmp, "FQ: %06.3f   SF: %d", _node_prefs->freq, _node_prefs->sf);
+    snprintf(tmp, sizeof(tmp), "FQ: %06.3f   SF: %d", _node_prefs->freq, _node_prefs->sf);
+    display.setCursor(0, y);
     display.print(tmp);
+    y += UI_LINE_HEIGHT;
 
-    display.setCursor(0, 29);
-    sprintf(tmp, "BW: %03.2f     CR: %d", _node_prefs->bw, _node_prefs->cr);
+    snprintf(tmp, sizeof(tmp), "BW: %03.2f     CR: %d", _node_prefs->bw, _node_prefs->cr);
+    display.setCursor(0, y);
     display.print(tmp);
+    y += UI_LINE_HEIGHT;
 
-    display.setCursor(0, 40);
-    sprintf(tmp, "TX: %ddBm", _node_prefs->tx_power_dbm);
+    snprintf(tmp, sizeof(tmp), "TX: %ddBm", _node_prefs->tx_power_dbm);
+    display.setCursor(0, y);
     display.print(tmp);
+    y += UI_LINE_HEIGHT;
 
-    display.setCursor(0, 51);
-    sprintf(tmp, "Noise: %d", radio_driver.getNoiseFloor());
+    snprintf(tmp, sizeof(tmp), "Noise: %d", radio_driver.getNoiseFloor());
+    display.setCursor(0, y);
     display.print(tmp);
-
-    return 5000;
   }
 
-  bool handleInput(char c) override {
-    if (c == KEY_NEXT || c == KEY_RIGHT) {
-      // Go to first message if there are messages, otherwise back to status
-      if (_page_count > 2) {  // More than just status + radio config
-        _task->gotoFirstMessage();
-        return true;
-      } else {
-        _task->gotoStatusScreen();
-        return true;
-      }
-    }
-    if (c == KEY_ENTER) {
-      _task->gotoStatusScreen();
-      return true;
-    }
-    return false;
-  }
-};
-
-class MsgPreviewScreen : public UIScreen {
-  UITask* _task;
-  mesh::RTCClock* _rtc;
-
-  int curr_idx;  // Current message being viewed (0 = newest)
-
-public:
-  MsgPreviewScreen(UITask* task, mesh::RTCClock* rtc) : _task(task), _rtc(rtc) { curr_idx = 0; }
-
-  int getDisplayCount() {
-    const PostInfo* posts[MAX_DISPLAY_MSGS];
-    return the_mesh.getRecentPosts(posts, MAX_DISPLAY_MSGS);
-  }
-
-  int getPageCount() { return getDisplayCount() + 2; }  // status + radio + messages
-  void resetToFirst() { curr_idx = 0; }
-
-  int render(DisplayDriver& display) override {
-    char tmp[16];
-    display.setCursor(0, 0);
-    display.setTextSize(1);
+  void renderAdvertPage(DisplayDriver& display) {
     display.setColor(DisplayDriver::GREEN);
+    display.setTextSize(1);
+    if (_advert_init) {
+      display.drawTextCentered(display.width() / 2, 34, "sending...");
+    } else {
+      display.drawXbm((display.width() - 32) / 2, 18, advert_icon, 32, 32);
+      display.drawTextCentered(display.width() / 2, 64 - 11, "advert: " PRESS_LABEL);
+    }
+  }
+
+#if ENV_INCLUDE_GPS == 1
+  void renderGPSPage(DisplayDriver& display) {
+    display.setColor(DisplayDriver::YELLOW);
+    char buf[50];
+    int y = UI_CONTENT_START_Y;
+
+    bool gps_state = _task->getGPSState();
+#ifdef PIN_GPS_SWITCH
+    bool hw_gps_state = digitalRead(PIN_GPS_SWITCH);
+    if (gps_state != hw_gps_state) {
+      strcpy(buf, gps_state ? "gps off(hw)" : "gps off(sw)");
+    } else {
+      strcpy(buf, gps_state ? "gps on" : "gps off");
+    }
+#else
+    strcpy(buf, gps_state ? "gps on" : "gps off");
+#endif
+    display.drawTextLeftAlign(0, y, buf);
+
+    LocationProvider* nmea = _sensors != NULL ? _sensors->getLocationProvider() : NULL;
+    if (nmea == NULL) {
+      y += UI_LINE_HEIGHT;
+      display.drawTextLeftAlign(0, y, "Can't access GPS");
+    } else {
+      strcpy(buf, nmea->isValid() ? "fix" : "no fix");
+      display.drawTextRightAlign(display.width()-1, y, buf);
+      y += UI_LINE_HEIGHT;
+      display.drawTextLeftAlign(0, y, "sat");
+      sprintf(buf, "%ld", nmea->satellitesCount());
+      display.drawTextRightAlign(display.width()-1, y, buf);
+      y += UI_LINE_HEIGHT;
+      display.drawTextLeftAlign(0, y, "pos");
+      sprintf(buf, "%.4f %.4f",
+        nmea->getLatitude()/1000000., nmea->getLongitude()/1000000.);
+      display.drawTextRightAlign(display.width()-1, y, buf);
+    }
+
+    y = 64 - 11;
+    display.setColor(DisplayDriver::GREEN);
+    if (_gps_toggle_init) {
+      display.drawTextCentered(display.width() / 2, y, "toggling...");
+    } else {
+      display.drawTextCentered(display.width() / 2, y, "toggle: " PRESS_LABEL);
+    }
+  }
+#endif
+
+#if UI_SENSORS_PAGE == 1
+  void renderSensorsPage(DisplayDriver& display) {
+    display.setColor(DisplayDriver::YELLOW);
+    int y = UI_CONTENT_START_Y;
+    refresh_sensors();
+    char buf[30];
+    char name[30];
+    LPPReader r(sensors_lpp.getBuffer(), sensors_lpp.getSize());
+
+    // Skip to scroll offset
+    for (int i = 0; i < sensors_scroll_offset; i++) {
+      uint8_t channel, type;
+      r.readHeader(channel, type);
+      r.skipData(type);
+    }
+
+    int display_count = sensors_scroll ? UI_RECENT_LIST_SIZE : sensors_nb;
+    for (int i = 0; i < display_count; i++) {
+      uint8_t channel, type;
+      if (!r.readHeader(channel, type)) {
+        r.reset();
+        r.readHeader(channel, type);
+      }
+
+      display.setCursor(0, y);
+      float v;
+      switch (type) {
+        case LPP_GPS: {
+          float lat, lon, alt;
+          r.readGPS(lat, lon, alt);
+          strcpy(name, "gps"); sprintf(buf, "%.4f %.4f", lat, lon);
+          break;
+        }
+        case LPP_VOLTAGE:
+          r.readVoltage(v);
+          strcpy(name, "voltage"); sprintf(buf, "%6.2f", v);
+          break;
+        case LPP_CURRENT:
+          r.readCurrent(v);
+          strcpy(name, "current"); sprintf(buf, "%.3f", v);
+          break;
+        case LPP_TEMPERATURE:
+          r.readTemperature(v);
+          strcpy(name, "temperature"); sprintf(buf, "%.2f", v);
+          break;
+        case LPP_RELATIVE_HUMIDITY:
+          r.readRelativeHumidity(v);
+          strcpy(name, "humidity"); sprintf(buf, "%.2f", v);
+          break;
+        case LPP_BAROMETRIC_PRESSURE:
+          r.readPressure(v);
+          strcpy(name, "pressure"); sprintf(buf, "%.2f", v);
+          break;
+        case LPP_ALTITUDE:
+          r.readAltitude(v);
+          strcpy(name, "altitude"); sprintf(buf, "%.0f", v);
+          break;
+        case LPP_POWER:
+          r.readPower(v);
+          strcpy(name, "power"); sprintf(buf, "%6.2f", v);
+          break;
+        default:
+          r.skipData(type);
+          strcpy(name, "unk"); sprintf(buf, "");
+      }
+      display.setCursor(0, y);
+      display.print(name);
+      display.drawTextRightAlign(display.width()-1, y, buf);
+      y += UI_LINE_HEIGHT;
+    }
+  }
+#endif
+
+  void renderAlarmPage(DisplayDriver& display) {
+    display.setColor(DisplayDriver::RED);
+    display.setTextSize(1);
+    if (_alarm_init) {
+      display.drawTextCentered(display.width() / 2, 34, "sending alarm...");
+    } else {
+      display.drawXbm((display.width() - 32) / 2, 18, alarm_icon, 32, 32);
+      display.drawTextCentered(display.width() / 2, 64 - 11, "alarm: " PRESS_LABEL);
+    }
+  }
+
+  void renderShutdownPage(DisplayDriver& display) {
+    display.setColor(DisplayDriver::GREEN);
+    display.setTextSize(1);
+    if (_shutdown_init) {
+      display.drawTextCentered(display.width() / 2, 34, "hibernating...");
+    } else {
+      display.drawXbm((display.width() - 32) / 2, 18, power_icon, 32, 32);
+      display.drawTextCentered(display.width() / 2, 64 - 11, "hibernate: " PRESS_LABEL);
+    }
+  }
+
+  void renderMessagePage(DisplayDriver& display, int msg_idx) {
+    char tmp[24];
 
     // Get recent posts directly from mesh
     const PostInfo* recent_posts[MAX_DISPLAY_MSGS];
     int count = the_mesh.getRecentPosts(recent_posts, MAX_DISPLAY_MSGS);
 
-    if (count == 0 || curr_idx >= count) {
-      // No posts or invalid index
+    if (count == 0 || msg_idx >= count) {
+      display.setColor(DisplayDriver::LIGHT);
       display.drawTextCentered(display.width()/2, display.height()/2, "No posts");
-      return 1000;
+      return;
     }
 
-    // curr_idx=0 shows newest post (recent_posts[0])
-    const PostInfo* p = recent_posts[curr_idx];
+    const PostInfo* p = recent_posts[msg_idx];
 
-    // Calculate age, or show NOSYNC if timestamp is in the future (clock not synced)
+    // Calculate age, or show NOSYNC if timestamp is in the future
     uint32_t current_time = _rtc->getCurrentTime();
     if (current_time < p->post_timestamp) {
-      // Timestamp is in the future - clock not synced yet
-      sprintf(tmp, "NOSYNC");
+      snprintf(tmp, sizeof(tmp), "NOSYNC");
     } else {
-      // Normal case - show relative time
       int secs = current_time - p->post_timestamp;
       if (secs < 60) {
-        sprintf(tmp, "%ds", secs);
+        snprintf(tmp, sizeof(tmp), "%ds", secs);
       } else if (secs < 60*60) {
-        sprintf(tmp, "%dm", secs / 60);
+        snprintf(tmp, sizeof(tmp), "%dm", secs / 60);
       } else {
-        sprintf(tmp, "%dh", secs / (60*60));
+        snprintf(tmp, sizeof(tmp), "%dh", secs / (60*60));
       }
     }
 
     // Format author with first 4 bytes of pubkey (8 hex characters)
-    char author_name[70];
-    sprintf(author_name, "[%02X%02X%02X%02X]",
-            p->author.pub_key[0], p->author.pub_key[1],
-            p->author.pub_key[2], p->author.pub_key[3]);
+    char author_name[24];
+    snprintf(author_name, sizeof(author_name), "[%02X%02X%02X%02X]",
+             p->author.pub_key[0], p->author.pub_key[1],
+             p->author.pub_key[2], p->author.pub_key[3]);
 
+    // Header: author on left, timestamp on right
+    display.setColor(DisplayDriver::GREEN);
     int timestamp_width = display.getTextWidth(tmp);
     int max_origin_width = display.width() - timestamp_width - 2;
-
-    char filtered_origin[70];
-    display.translateUTF8ToBlocks(filtered_origin, author_name, sizeof(filtered_origin));
-    display.drawTextEllipsized(0, 0, max_origin_width, filtered_origin);
-
-    display.setCursor(display.width() - timestamp_width - 1, 0);
+    display.drawTextEllipsized(0, UI_HEADER_Y, max_origin_width, author_name);
+    display.setCursor(display.width() - timestamp_width - 1, UI_HEADER_Y);
     display.print(tmp);
 
-    // Page dots - centred at y=12
-    int y = 12;
-    int page_count = getPageCount();
-    int x_start = (display.width() - (page_count * 10)) / 2;
-    for (int i = 0; i < page_count; i++) {
-      int x = x_start + (i * 10);
-      if (i == curr_idx + 2) {  // Current message page (offset by status + radio pages)
-        display.fillRect(x-1, y-1, 3, 3);
-      } else {
-        display.fillRect(x, y, 1, 1);
-      }
-    }
-
-    display.setCursor(0, 16);
+    display.setCursor(0, UI_CONTENT_START_Y);
 
     // Set colour based on severity prefix
     if (strncmp(p->text, SEVERITY_PREFIX_CRITICAL, SEVERITY_PREFIX_LEN - 1) == 0) {
@@ -379,37 +508,171 @@ public:
     } else if (strncmp(p->text, SEVERITY_PREFIX_WARNING, SEVERITY_PREFIX_LEN - 1) == 0) {
       display.setColor(DisplayDriver::YELLOW);
     } else {
-      display.setColor(DisplayDriver::LIGHT);  // Default for BLTN-INFO: and user posts
+      display.setColor(DisplayDriver::LIGHT);
     }
 
     char filtered_msg[MAX_POST_TEXT_LEN+1];
     display.translateUTF8ToBlocks(filtered_msg, p->text, sizeof(filtered_msg));
     display.printWordWrap(filtered_msg, display.width());
+  }
 
-#if AUTO_OFF_MILLIS==0
-    return 10000;
-#else
-    return 1000;
+public:
+  HomeScreen(UITask* task, mesh::RTCClock* rtc, SensorManager* sensors, NodePrefs* node_prefs)
+     : _task(task), _rtc(rtc), _sensors(sensors), _node_prefs(node_prefs),
+       _page(0), _shutdown_init(false), _advert_init(false), _alarm_init(false),
+       _gps_toggle_init(false), sensors_lpp(200), sensors_nb(0), sensors_scroll(false),
+       sensors_scroll_offset(0), next_sensors_refresh(0) { }
+
+  void poll() override {
+    // Deferred actions - wait for button release
+    if (!_task->isButtonPressed()) {
+      if (_shutdown_init) {
+        _task->shutdown();
+      }
+      if (_advert_init) {
+        the_mesh.sendSelfAdvertisement(0);  // Send immediately
+        _task->showAlert("Advert sent!", 1000);
+        _advert_init = false;
+      }
+#if ENV_INCLUDE_GPS == 1
+      if (_gps_toggle_init) {
+        _task->toggleGPS();
+        _gps_toggle_init = false;
+      }
 #endif
+      if (_alarm_init) {
+        // Post ALARM bulletin
+        char alarm_msg[80];
+        uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+        DateTime dt = DateTime(now);
+        snprintf(alarm_msg, sizeof(alarm_msg), "ALARM at %02d:%02d - %d/%d/%d UTC",
+                 dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+        the_mesh.addBulletin(alarm_msg, SEVERITY_WARNING);
+        _task->showAlert("Alarm posted!", 1000);
+        _alarm_init = false;
+      }
+    }
+  }
+
+  int render(DisplayDriver& display) override {
+    display.setTextSize(1);
+    display.setColor(DisplayDriver::GREEN);
+
+    // Get page count (may change if messages added/removed)
+    int page_count = getPageCount();
+
+    // Clamp page if it exceeds bounds
+    if (_page >= page_count) {
+      _page = 0;
+    }
+
+    // Title based on current page
+    const char* title;
+    if (_page == STATUS) title = "Node Status";
+    else if (_page == NODEINFO) title = "Node Info";
+    else if (_page == RADIOINFO) title = "Radio Config";
+    else if (_page == ADVERT) title = "Send Advert";
+#if ENV_INCLUDE_GPS == 1
+    else if (_page == GPS) title = "GPS";
+#endif
+#if UI_SENSORS_PAGE == 1
+    else if (_page == SENSORS) title = "Sensors";
+#endif
+    else if (_page == ALARM) title = "Alarm";
+    else if (_page == SHUTDOWN) title = "Shutdown";
+    else title = "Message";
+
+    display.setCursor(0, UI_HEADER_Y);
+    display.print(title);
+
+    renderBatteryIndicator(display, _task->getBattMilliVolts());
+    renderPageDots(display, page_count, _page);
+
+    // Dispatch to page-specific render
+    if (_page == STATUS) {
+      renderStatusPage(display);
+    } else if (_page == NODEINFO) {
+      renderNodeInfoPage(display);
+    } else if (_page == RADIOINFO) {
+      renderRadioInfoPage(display);
+    } else if (_page == ADVERT) {
+      renderAdvertPage(display);
+#if ENV_INCLUDE_GPS == 1
+    } else if (_page == GPS) {
+      renderGPSPage(display);
+#endif
+#if UI_SENSORS_PAGE == 1
+    } else if (_page == SENSORS) {
+      renderSensorsPage(display);
+#endif
+    } else if (_page == ALARM) {
+      renderAlarmPage(display);
+    } else if (_page == SHUTDOWN) {
+      renderShutdownPage(display);
+    } else if (_page >= MSG_BASE) {
+      renderMessagePage(display, _page - MSG_BASE);
+    }
+
+    return 5000;
   }
 
   bool handleInput(char c) override {
+    int page_count = getPageCount();
+
+    // Navigation with wrap-around
+    if (c == KEY_LEFT || c == KEY_PREV) {
+      _page = (_page + page_count - 1) % page_count;
+      return true;
+    }
     if (c == KEY_NEXT || c == KEY_RIGHT) {
-      curr_idx++;
-      if (curr_idx >= getDisplayCount()) {
-        // Loop back to status page
-        _task->gotoStatusScreen();
-      }
+      _page = (_page + 1) % page_count;
       return true;
     }
+
+    // Long-press actions (KEY_ENTER from handleLongPress)
     if (c == KEY_ENTER) {
-      curr_idx = 0;
-      _task->gotoStatusScreen();
-      return true;
+      if (_page == ADVERT) {
+        _advert_init = true;
+        return true;
+      }
+#if ENV_INCLUDE_GPS == 1
+      if (_page == GPS) {
+        _gps_toggle_init = true;
+        return true;
+      }
+#endif
+#if UI_SENSORS_PAGE == 1
+      if (_page == SENSORS) {
+        // Scroll sensors on long press
+        if (sensors_scroll) {
+          sensors_scroll_offset = (sensors_scroll_offset + UI_RECENT_LIST_SIZE) % sensors_nb;
+        }
+        return true;
+      }
+#endif
+      if (_page == ALARM) {
+        _alarm_init = true;
+        return true;
+      }
+      if (_page == SHUTDOWN) {
+        _shutdown_init = true;
+        return true;
+      }
     }
+
     return false;
   }
+
+  void resetToFirstMessage() {
+    _page = MSG_BASE;
+  }
+
+  void gotoStatusPage() {
+    _page = STATUS;
+  }
 };
+
+// UITask implementation
 
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _display = display;
@@ -432,39 +695,17 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _alert_expiry = 0;
 
   splash = new SplashScreen(this);
-  status_screen = new StatusScreen(this, node_prefs, &rtc_clock);
-  radio_config = new RadioConfigScreen(this, node_prefs);
-  msg_preview = new MsgPreviewScreen(this, &rtc_clock);
+  home = new HomeScreen(this, &rtc_clock, sensors, node_prefs);
   setCurrScreen(splash);
 }
 
-void UITask::gotoStatusScreen() {
-  MsgPreviewScreen* msg_screen = (MsgPreviewScreen*)msg_preview;
-  StatusScreen* status = (StatusScreen*)status_screen;
-
-  // Update status screen with current page count
-  status->setPageCount(msg_screen->getPageCount());
-  setCurrScreen(status_screen);
-}
-
-void UITask::gotoRadioConfigScreen() {
-  MsgPreviewScreen* msg_screen = (MsgPreviewScreen*)msg_preview;
-  RadioConfigScreen* radio = (RadioConfigScreen*)radio_config;
-
-  // Update radio config screen with current page count
-  radio->setPageCount(msg_screen->getPageCount());
-  setCurrScreen(radio_config);
-}
-
-void UITask::gotoFirstMessage() {
-  MsgPreviewScreen* msg_screen = (MsgPreviewScreen*)msg_preview;
-  msg_screen->resetToFirst();
-  setCurrScreen(msg_preview);
+void UITask::gotoHomeScreen() {
+  setCurrScreen(home);
 }
 
 void UITask::showAlert(const char* text, int duration_millis) {
   strncpy(_alert, text, sizeof(_alert) - 1);
-  _alert[sizeof(_alert) - 1] = '\0';  // Ensure null termination
+  _alert[sizeof(_alert) - 1] = '\0';
   _alert_expiry = millis() + duration_millis;
 }
 
@@ -472,9 +713,8 @@ void UITask::notify(UIEventType t) {
   if (t == UIEventType::roomMessage) {
     // New post available - switch to message screen (unless on splash)
     if (curr != splash) {
-      MsgPreviewScreen* msg_screen = (MsgPreviewScreen*)msg_preview;
-      msg_screen->resetToFirst();
-      setCurrScreen(msg_preview);
+      ((HomeScreen*)home)->resetToFirstMessage();
+      setCurrScreen(home);
     }
   }
 }
@@ -593,16 +833,70 @@ char UITask::checkDisplayOn(char c) {
 }
 
 char UITask::handleLongPress(char c) {
-  // Post ALARM bulletin
-  char alarm_msg[80];
-  uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
-  DateTime dt = DateTime(now);
-  sprintf(alarm_msg, "ALARM at %02d:%02d - %d/%d/%d UTC",
-          dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
-
-  the_mesh.addBulletin(alarm_msg, SEVERITY_WARNING);
-  showAlert("Alarm posted!", 1000);
-
-  c = 0;
+  // Pass KEY_ENTER to current screen for page-specific actions
+  // Display must be on first
+  if (_display != NULL && !_display->isOn()) {
+    _display->turnOn();
+    _auto_off = millis() + AUTO_OFF_MILLIS;
+    _next_refresh = 0;
+    return 0;
+  }
   return c;
+}
+
+bool UITask::isButtonPressed() const {
+#if defined(PIN_USER_BTN)
+  return user_btn.isPressed();
+#elif defined(PIN_USER_BTN_ANA)
+  return analog_btn.isPressed();
+#else
+  return false;
+#endif
+}
+
+bool UITask::getGPSState() {
+  if (_sensors != NULL) {
+    int num = _sensors->getNumSettings();
+    for (int i = 0; i < num; i++) {
+      if (strcmp(_sensors->getSettingName(i), "gps") == 0) {
+        return strcmp(_sensors->getSettingValue(i), "1") == 0;
+      }
+    }
+  }
+  return false;
+}
+
+void UITask::toggleGPS() {
+  if (_sensors != NULL) {
+    int num = _sensors->getNumSettings();
+    for (int i = 0; i < num; i++) {
+      if (strcmp(_sensors->getSettingName(i), "gps") == 0) {
+        NodePrefs* prefs = the_mesh.getNodePrefs();
+        if (strcmp(_sensors->getSettingValue(i), "1") == 0) {
+          _sensors->setSettingValue("gps", "0");
+          prefs->gps_enabled = 0;
+          showAlert("GPS: Disabled", 800);
+        } else {
+          _sensors->setSettingValue("gps", "1");
+          prefs->gps_enabled = 1;
+          showAlert("GPS: Enabled", 800);
+        }
+        the_mesh.savePrefs();  // Persist to storage
+        _next_refresh = 0;
+        break;
+      }
+    }
+  }
+}
+
+void UITask::shutdown(bool restart) {
+  if (restart) {
+    _board->reboot();
+  } else {
+    if (_display != NULL) {
+      _display->turnOff();
+    }
+    radio_driver.powerOff();
+    _board->powerOff();
+  }
 }

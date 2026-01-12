@@ -20,16 +20,18 @@ class UITask : public AbstractUITask {
   char _alert[80];
   unsigned long _alert_expiry;
   unsigned long ui_started_at, next_batt_chck;
+  int next_backlight_btn_check = 0;
 #ifdef PIN_STATUS_LED
   int led_state = 0;
   int next_led_change = 0;
   int last_led_increment = 0;
 #endif
+#ifdef PIN_USER_BTN_ANA
+  unsigned long _analogue_pin_read_millis = millis();
+#endif
 
   UIScreen* splash;
-  UIScreen* status_screen;
-  UIScreen* radio_config;
-  UIScreen* msg_preview;
+  UIScreen* home;
   UIScreen* curr;
 
   void userLedHandler();
@@ -41,18 +43,20 @@ class UITask : public AbstractUITask {
   void setCurrScreen(UIScreen* c);
 
 public:
-  UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
-    : AbstractUITask(board, serial), _display(NULL), _sensors(NULL) {
+  UITask(mesh::MainBoard* board, BaseSerialInterface* serial) : AbstractUITask(board, serial), _display(NULL), _sensors(NULL) {
     next_batt_chck = _next_refresh = 0;
     ui_started_at = 0;
     curr = NULL;
   }
 
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
-  void gotoStatusScreen();
-  void gotoRadioConfigScreen();
-  void gotoFirstMessage();
+  void gotoHomeScreen();
   void showAlert(const char* text, int duration_millis);
+  bool hasDisplay() const { return _display != NULL; }
+  bool isButtonPressed() const;
+
+  bool getGPSState();
+  void toggleGPS();
 
   // from AbstractUITask
   void notify(UIEventType t = UIEventType::none) override;
