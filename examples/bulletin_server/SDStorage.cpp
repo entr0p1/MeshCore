@@ -12,7 +12,15 @@ bool SDStorage::begin(int cs_pin) {
     return false;
   }
 
+  // Configure custom SPI pins if defined (ESP32 only)
+#if defined(ESP32) && defined(PIN_SDCARD_SCK) && defined(PIN_SDCARD_MISO) && defined(PIN_SDCARD_MOSI)
+  SPI.begin(PIN_SDCARD_SCK, PIN_SDCARD_MISO, PIN_SDCARD_MOSI, _cs_pin);
+  Serial.printf("SDStorage: Using custom SPI pins - SCK:%d MISO:%d MOSI:%d CS:%d\n",
+                PIN_SDCARD_SCK, PIN_SDCARD_MISO, PIN_SDCARD_MOSI, _cs_pin);
+  if (!SD.begin(_cs_pin, SPI)) {
+#else
   if (!SD.begin(_cs_pin)) {
+#endif
     Serial.println("SDStorage: SD.begin() failed - card not present or unformatted");
     _status = SD_NOT_PRESENT;
     return false;
