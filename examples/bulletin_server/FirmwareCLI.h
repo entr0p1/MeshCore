@@ -16,8 +16,7 @@ class SDStorage;
  * - set/get nettime.enable - Network time sync enable
  * - set/get nettime.maxwait - Network time sync max wait
  * - get nettime.status - Network time sync status
- * - channel - Display channel mode
- * - channel public/private - Switch channel mode
+ * - set/get channel.mode - Set or get channel mode
  * - login.history - Display login history
  * - appreply <app_name> <pubkey_hex> <text> - Send app response
  * - erase.sdcard - Erase SD card data
@@ -47,9 +46,8 @@ private:
   bool cmdSetNettimeMaxwait(const char* val, char* reply);
   bool cmdGetNettimeMaxwait(char* reply);
   bool cmdGetNettimeStatus(char* reply);
-  bool cmdChannel(char* reply);
-  bool cmdChannelPublic(char* reply);
-  bool cmdChannelPrivate(char* reply);
+  bool cmdGetChannelMode(char* reply);
+  bool cmdSetChannelMode(const char* val, char* reply);
   bool cmdLoginHistory(char* reply);
   bool cmdAppReply(const char* args, char* reply);
   bool cmdEraseSDCard(char* reply);

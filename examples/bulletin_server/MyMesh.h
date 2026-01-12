@@ -3,7 +3,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 
-#if defined(NRF52_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #include <InternalFileSystem.h>
 #elif defined(RP2040_PLATFORM)
   #include <LittleFS.h>
@@ -11,6 +11,7 @@
   #include <SPIFFS.h>
 #endif
 
+#include <RTClib.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/SimpleMeshTables.h>
@@ -20,12 +21,12 @@
 #include <helpers/CommonCLI.h>
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/ClientACL.h>
-#include <RTClib.h>
 #include <target.h>
 
 // Forward declarations
 class SystemMessageHandler;
 class SDStorage;
+class DataStore;
 class FirmwareCLI;
 class UserCLI;
 
@@ -39,7 +40,9 @@ class UserCLI;
   #define FIRMWARE_VERSION   "v1.0.0"
 #endif
 
+#ifndef MESHCORE_VERSION
 #define MESHCORE_VERSION "1.11.0"
+#endif
 
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0
@@ -55,6 +58,9 @@ class UserCLI;
 #endif
 #ifndef LORA_TX_POWER
   #define LORA_TX_POWER  20
+#endif
+#ifndef MAX_LORA_TX_POWER
+#define MAX_LORA_TX_POWER LORA_TX_POWER
 #endif
 
 #ifndef ADVERT_NAME
@@ -140,10 +146,17 @@ struct RepeaterAdvert {
   uint32_t received_time;    // Our clock time when advert was received (for aging)
 };
 
+struct AdvertPath {
+  uint8_t pubkey_prefix[7];
+  uint8_t path_len;
+  char    name[32];
+  uint32_t recv_timestamp;
+  uint8_t path[MAX_PATH_SIZE];
+};
+
 // Bulletin server - manages posts, client sync, and flash persistence
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
-  FILESYSTEM* _fs;
-  SDStorage* _sd;  // SD card storage (ESP32 only, may be null)
+  DataStore* _store;
   FirmwareCLI* _firmware_cli;  // Bulletin server CLI commands
   UserCLI* _user_cli;          // User CLI commands (! prefix)
   unsigned long next_local_advert, next_flood_advert;
@@ -200,7 +213,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void trackLogin(const uint8_t* pub_key, uint8_t permissions, uint32_t timestamp);
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
-  File openAppend(const char* fname);
+  bool isFlashConfigUsable(const char* filename, size_t min_size) const;
+  void restoreConfigFromSDIfNeeded();
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   void savePosts();
   void loadPosts();
@@ -268,7 +282,8 @@ protected:
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
 
-  void begin(FILESYSTEM* fs, SDStorage* sd = nullptr);
+  void begin(DataStore* store);
+  void backupConfigToSD();
 
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
   const char* getBuildDate() override { return FIRMWARE_BUILD_DATE; }
@@ -278,15 +293,10 @@ public:
     return &_prefs;
   }
   ClientACL* getACL() { return &acl; }
-  SDStorage* getSDStorage() { return _sd; }
+  DataStore* getDataStore() { return _store; }
   uint16_t getNumPosted() const { return _num_posted; }
 
-  // Platform-specific file open for writing (used by SystemMessageHandler)
-  static File openFileForWrite(FILESYSTEM* fs, const char* filename);
-
-  void savePrefs() override {
-    _cli.savePrefs(_fs);
-  }
+  void savePrefs() override;
 
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
   bool formatFileSystem() override;
@@ -295,10 +305,7 @@ public:
   void updateFloodAdvertTimer() override;
 
   void setLoggingOn(bool enable) override { _logging = enable; }
-
-  void eraseLogFile() override {
-    _fs->remove(PACKET_LOG_FILE);
-  }
+  void eraseLogFile() override;
 
   void dumpLogFile() override;
   void setTxPower(uint8_t power_dbm) override;

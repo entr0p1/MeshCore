@@ -2,15 +2,18 @@
 
 #include <Arduino.h>
 
-#ifdef ESP32
+#ifdef PIN_SDCARD_CS
   #include <SD.h>
   #include <SPI.h>
   #include <FS.h>
+  #define SD_SUPPORTED 1
+#else
+  #define SD_SUPPORTED 0
 #endif
 
 // SD Card storage status
 enum SDStatus {
-  SD_NOT_SUPPORTED,    // Platform doesn't support SD (nRF52, RP2040)
+  SD_NOT_SUPPORTED,    // Platform doesn't support SD (PIN_SDCARD_CS not defined)
   SD_NOT_PRESENT,      // SD slot exists but no card inserted
   SD_UNFORMATTED,      // Card present but not formatted/accessible
   SD_READY             // Card ready for use
@@ -44,9 +47,13 @@ public:
   // Erase all bulletin server data from SD card
   bool eraseAllData();
 
+#if SD_SUPPORTED
   // File operations (automatically adds /bulletin/ prefix)
+  // Only available when PIN_SDCARD_CS is defined
   File openForRead(const char* filename);
   File openForWrite(const char* filename);
+#endif
+
   bool exists(const char* filename);
   bool remove(const char* filename);
 

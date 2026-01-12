@@ -1,5 +1,4 @@
 #include "SystemMessageHandler.h"
-#include "MyMesh.h"
 #include <helpers/TxtDataHelpers.h>
 
 void SystemMessageHandler::load(FILESYSTEM* fs) {
@@ -29,7 +28,14 @@ void SystemMessageHandler::load(FILESYSTEM* fs) {
 }
 
 void SystemMessageHandler::save(FILESYSTEM* fs) {
-  File file = MyMesh::openFileForWrite(fs, "/system_msgs");
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  fs->remove("/system_msgs");
+  File file = fs->open("/system_msgs", FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  File file = fs->open("/system_msgs", "w");
+#else
+  File file = fs->open("/system_msgs", "w", true);
+#endif
   if (file) {
     file.write((uint8_t*)&num_messages, 1);
 

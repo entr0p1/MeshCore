@@ -1,5 +1,6 @@
 #include "FirmwareCLI.h"
 #include "MyMesh.h"
+#include "DataStore.h"
 #include "SDStorage.h"
 #include <RTClib.h>
 
@@ -39,14 +40,11 @@ bool FirmwareCLI::handleCommand(uint32_t sender_timestamp, char* command, char* 
   }
 
   // Channel commands
-  if (strcmp(command, "channel") == 0) {
-    return cmdChannel(reply);
+  if (strcmp(command, "get channel.mode") == 0) {
+    return cmdGetChannelMode(reply);
   }
-  if (strcmp(command, "channel public") == 0) {
-    return cmdChannelPublic(reply);
-  }
-  if (strcmp(command, "channel private") == 0) {
-    return cmdChannelPrivate(reply);
+  if (memcmp(command, "set channel.mode ", 17) == 0) {
+    return cmdSetChannelMode(&command[17], reply);
   }
 
   // Login history
@@ -202,20 +200,25 @@ bool FirmwareCLI::cmdGetNettimeStatus(char* reply) {
   return true;
 }
 
-bool FirmwareCLI::cmdChannel(char* reply) {
-  strcpy(reply, _mesh->isChannelPrivate() ? "Mode: private" : "Mode: public");
+bool FirmwareCLI::cmdGetChannelMode(char* reply) {
+  strcpy(reply, _mesh->isChannelPrivate() ? "private" : "public");
   return true;
 }
 
-bool FirmwareCLI::cmdChannelPublic(char* reply) {
-  _mesh->setChannelModePublic();
-  strcpy(reply, "OK - Switched to public mode");
-  return true;
-}
-
-bool FirmwareCLI::cmdChannelPrivate(char* reply) {
-  _mesh->setChannelModePrivate();
-  reply[0] = '\0';
+bool FirmwareCLI::cmdSetChannelMode(const char* val, char* reply) {
+  if (strcmp(val, "public") == 0) {
+    if (_mesh->isChannelPrivate()) {
+      _mesh->setChannelModePublic();
+    }
+    strcpy(reply, "OK - Channel mode set to public");
+  } else if (strcmp(val, "private") == 0) {
+    if (!_mesh->isChannelPrivate()) {
+      _mesh->setChannelModePrivate();
+    }
+    strcpy(reply, "OK - Channel mode set to private");
+  } else {
+    strcpy(reply, "Error: Use 'public' or 'private'");
+  }
   return true;
 }
 
@@ -283,10 +286,10 @@ bool FirmwareCLI::cmdAppReply(const char* args, char* reply) {
 }
 
 bool FirmwareCLI::cmdEraseSDCard(char* reply) {
-  SDStorage* sd = _mesh->getSDStorage();
+  SDStorage* sd = _mesh->getDataStore()->getSD();
   if (sd && sd->isReady()) {
     if (sd->eraseAllData()) {
-      // TODO: Trigger initial config copy to SD after erase
+      _mesh->backupConfigToSD();
       strcpy(reply, "OK - SD card data erased");
     } else {
       strcpy(reply, "ERROR: Erase failed");

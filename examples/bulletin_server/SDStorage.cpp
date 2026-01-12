@@ -3,12 +3,8 @@
 SDStorage::SDStorage() : _status(SD_NOT_SUPPORTED), _cs_pin(-1) {}
 
 bool SDStorage::begin(int cs_pin) {
-#ifdef ESP32
-  #ifdef PIN_SDCARD_CS
-    _cs_pin = (cs_pin >= 0) ? cs_pin : PIN_SDCARD_CS;
-  #else
-    _cs_pin = cs_pin;
-  #endif
+#if SD_SUPPORTED
+  _cs_pin = (cs_pin >= 0) ? cs_pin : PIN_SDCARD_CS;
 
   if (_cs_pin < 0) {
     Serial.println("SDStorage: No SD CS pin defined for this board");
@@ -44,14 +40,14 @@ bool SDStorage::begin(int cs_pin) {
                 (unsigned long)getTotalSpace(), (unsigned long)getFreeSpace());
   return true;
 #else
-  // Non-ESP32 platforms don't support SD
+  // SD not supported on this platform (PIN_SDCARD_CS not defined)
   _status = SD_NOT_SUPPORTED;
   return false;
 #endif
 }
 
 uint32_t SDStorage::getTotalSpace() const {
-#ifdef ESP32
+#if SD_SUPPORTED
   if (_status != SD_READY) return 0;
   return SD.totalBytes() / 1024;
 #else
@@ -60,7 +56,7 @@ uint32_t SDStorage::getTotalSpace() const {
 }
 
 uint32_t SDStorage::getUsedSpace() const {
-#ifdef ESP32
+#if SD_SUPPORTED
   if (_status != SD_READY) return 0;
   return SD.usedBytes() / 1024;
 #else
@@ -109,7 +105,7 @@ void SDStorage::formatStorageString(char* dest, size_t len) const {
 }
 
 bool SDStorage::eraseAllData() {
-#ifdef ESP32
+#if SD_SUPPORTED
   if (_status != SD_READY) return false;
 
   File dir = SD.open(SD_BASE_DIR);
@@ -141,30 +137,24 @@ void SDStorage::buildPath(char* dest, size_t destLen, const char* filename) cons
   }
 }
 
+#if SD_SUPPORTED
 File SDStorage::openForRead(const char* filename) {
-#ifdef ESP32
   if (_status != SD_READY) return File();
   char path[64];
   buildPath(path, sizeof(path), filename);
   return SD.open(path, FILE_READ);
-#else
-  return File();
-#endif
 }
 
 File SDStorage::openForWrite(const char* filename) {
-#ifdef ESP32
   if (_status != SD_READY) return File();
   char path[64];
   buildPath(path, sizeof(path), filename);
   return SD.open(path, FILE_WRITE);
-#else
-  return File();
-#endif
 }
+#endif
 
 bool SDStorage::exists(const char* filename) {
-#ifdef ESP32
+#if SD_SUPPORTED
   if (_status != SD_READY) return false;
   char path[64];
   buildPath(path, sizeof(path), filename);
@@ -175,7 +165,7 @@ bool SDStorage::exists(const char* filename) {
 }
 
 bool SDStorage::remove(const char* filename) {
-#ifdef ESP32
+#if SD_SUPPORTED
   if (_status != SD_READY) return false;
   char path[64];
   buildPath(path, sizeof(path), filename);

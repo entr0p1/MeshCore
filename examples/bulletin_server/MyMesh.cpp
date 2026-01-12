@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include "DataStore.h"
 #include "SystemMessageHandler.h"
 #include "SDStorage.h"
 #include "FirmwareCLI.h"
@@ -189,7 +190,7 @@ bool MyMesh::processAck(const uint8_t *data) {
       if (pending_system_msg_idx[i] >= 0) {
         int msg_idx = pending_system_msg_idx[i];
         system_msgs->markPushed(msg_idx, client);
-        system_msgs->save(_fs);
+        system_msgs->save(_store->getFS());
         MESH_DEBUG_PRINTLN("System message %d ACKed by admin %02X, marked delivered", msg_idx, (uint32_t)client->id.pub_key[0]);
 
         // Always-on Serial output for production monitoring
@@ -223,25 +224,60 @@ mesh::Packet *MyMesh::createSelfAdvert() {
   return createAdvert(self_id, app_data, app_data_len);
 }
 
-File MyMesh::openAppend(const char *fname) {
-#if defined(NRF52_PLATFORM)
-  return _fs->open(fname, FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-  return _fs->open(fname, "a");
-#else
-  return _fs->open(fname, "a", true);
-#endif
+// Implementations moved to DataStore - these are left for savePrefs and eraseLogFile
+
+void MyMesh::savePrefs() {
+  _cli.savePrefs(_store->getFS());
+  _store->backupToSD("/com_prefs");
 }
 
-File MyMesh::openFileForWrite(FILESYSTEM* fs, const char *filename) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  fs->remove(filename);  // Delete before write on NRF52/STM32
-  return fs->open(filename, FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-  return fs->open(filename, "w");
-#else
-  return fs->open(filename, "w", true);
-#endif
+void MyMesh::eraseLogFile() {
+  _store->removeFile(PACKET_LOG_FILE);
+}
+
+static const size_t kCommonPrefsMinSize = 170;
+
+bool MyMesh::isFlashConfigUsable(const char* filename, size_t min_size) const {
+  if (!_store || !_store->exists(filename)) {
+    return false;
+  }
+
+  File file = _store->openRead(filename);
+  if (!file) {
+    return false;
+  }
+
+  if (min_size > 0 && file.size() < min_size) {
+    file.close();
+    return false;
+  }
+
+  file.close();
+  return true;
+}
+
+void MyMesh::backupConfigToSD() {
+  if (!_store) return;
+  _store->backupToSD("/com_prefs");
+  _store->backupToSD("/s_contacts");
+  _store->backupToSD("/channel_cfg");
+  _store->backupToSD("/netsync_cfg");
+}
+
+void MyMesh::restoreConfigFromSDIfNeeded() {
+  if (!_store) return;
+  if (!isFlashConfigUsable("/com_prefs", kCommonPrefsMinSize)) {
+    _store->restoreFromSD("/com_prefs");
+  }
+  if (!isFlashConfigUsable("/s_contacts", 0)) {
+    _store->restoreFromSD("/s_contacts");
+  }
+  if (!isFlashConfigUsable("/channel_cfg", sizeof(BulletinChannelConfig))) {
+    _store->restoreFromSD("/channel_cfg");
+  }
+  if (!isFlashConfigUsable("/netsync_cfg", sizeof(ClockNetSyncConfig))) {
+    _store->restoreFromSD("/netsync_cfg");
+  }
 }
 
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload,
@@ -312,7 +348,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   if (_logging) {
-    File f = openAppend(PACKET_LOG_FILE);
+    File f = _store->openAppend(PACKET_LOG_FILE);
     if (f) {
       f.print(getLogDateTime());
       f.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d", len,
@@ -331,7 +367,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
   if (_logging) {
-    File f = openAppend(PACKET_LOG_FILE);
+    File f = _store->openAppend(PACKET_LOG_FILE);
     if (f) {
       f.print(getLogDateTime());
       f.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)", len, pkt->getPayloadType(),
@@ -349,7 +385,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 }
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
   if (_logging) {
-    File f = openAppend(PACKET_LOG_FILE);
+    File f = _store->openAppend(PACKET_LOG_FILE);
     if (f) {
       f.print(getLogDateTime());
       f.printf(": TX FAIL!, len=%d (type=%d, route=%s, payload_len=%d)\n", len, pkt->getPayloadType(),
@@ -804,7 +840,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
   _logging = false;
-  _sd = nullptr;
+  _store = nullptr;
   set_radio_at = revert_radio_at = 0;
   current_boot_sequence = 0;
   system_msgs = new SystemMessageHandler();
@@ -892,7 +928,7 @@ uint32_t MyMesh::loadBootCounter(FILESYSTEM* fs) {
 }
 
 void MyMesh::saveBootCounter(FILESYSTEM* fs, uint32_t count) {
-  File file = openFileForWrite(fs, "/boot_count");
+  File file = _store->openWrite("/boot_count");
 
   if (file) {
     file.write((uint8_t*)&count, 4);
@@ -928,7 +964,7 @@ void MyMesh::addSystemMessage(const char* message) {
            current_boot_sequence, message);
 
   system_msgs->addMessage(formatted_msg, current_boot_sequence);
-  system_msgs->save(_fs);
+  system_msgs->save(_store->getFS());
   // Note: Serial output now handled by SystemMessageQueue::addMessage()
   MESH_DEBUG_PRINTLN("Added system message (boot %u), now have %d messages",
                      current_boot_sequence, system_msgs->getNumMessages());
@@ -937,61 +973,84 @@ void MyMesh::addSystemMessage(const char* message) {
 // ----------------------- Network Time Synchronisation -----------------------
 
 void MyMesh::loadNetSyncConfig() {
-  File f = _fs->open("/netsync_cfg", "r");
+  ClockNetSyncConfig loaded_config;
+  bool loaded = false;
+
+  File f = _store->openRead( "/netsync_cfg");
   if (f) {
-    ClockNetSyncConfig loaded_config;
     size_t bytes_read = f.read((uint8_t*)&loaded_config, sizeof(loaded_config));
     f.close();
 
-    // Validate and apply
     if (bytes_read == sizeof(loaded_config) && loaded_config.guard == 0xDEADBEEF) {
-      // Range check maxwait_mins
       if (loaded_config.maxwait_mins >= 5 && loaded_config.maxwait_mins <= 60) {
-        netsync_config = loaded_config;
-        MESH_DEBUG_PRINTLN("Loaded network time sync config: enabled=%d, maxwait=%d min",
-                          netsync_config.enabled, netsync_config.maxwait_mins);
+        loaded = true;
       } else {
         MESH_DEBUG_PRINTLN("Invalid maxwait_mins in config, using defaults");
       }
-    } else {
-      MESH_DEBUG_PRINTLN("Invalid network time sync config, using defaults");
     }
+  }
+
+  if (!loaded && _store->restoreFromSD("/netsync_cfg")) {
+    File rf = _store->openRead( "/netsync_cfg");
+    if (rf) {
+      size_t bytes_read = rf.read((uint8_t*)&loaded_config, sizeof(loaded_config));
+      rf.close();
+      if (bytes_read == sizeof(loaded_config) && loaded_config.guard == 0xDEADBEEF &&
+          loaded_config.maxwait_mins >= 5 && loaded_config.maxwait_mins <= 60) {
+        loaded = true;
+      }
+    }
+  }
+
+  if (loaded) {
+    netsync_config = loaded_config;
+    MESH_DEBUG_PRINTLN("Loaded network time sync config: enabled=%d, maxwait=%d min",
+                      netsync_config.enabled, netsync_config.maxwait_mins);
   } else {
-    MESH_DEBUG_PRINTLN("No network time sync config found, using defaults");
+    MESH_DEBUG_PRINTLN("Invalid or missing network time sync config, using defaults");
   }
 }
 
 void MyMesh::saveNetSyncConfig() {
-  File f = openFileForWrite(_fs, "/netsync_cfg");
+  File f = _store->openWrite( "/netsync_cfg");
   if (f) {
     f.write((uint8_t*)&netsync_config, sizeof(netsync_config));
     f.close();
+    _store->backupToSD("/netsync_cfg");
     MESH_DEBUG_PRINTLN("Saved network time sync config");
   }
 }
 
 void MyMesh::loadChannelConfig() {
-  File f = _fs->open(CHANNEL_CONFIG_FILE, "r");
+  BulletinChannelConfig loaded_config;
+  bool loaded = false;
+
+  File f = _store->openRead( CHANNEL_CONFIG_FILE);
   if (f) {
-    BulletinChannelConfig loaded_config;
     size_t bytes_read = f.read((uint8_t*)&loaded_config, sizeof(loaded_config));
     f.close();
 
-    // Validate and apply
     if (bytes_read == sizeof(loaded_config) && loaded_config.guard == 0xDEADBEEF) {
-      channel_config = loaded_config;
-      MESH_DEBUG_PRINTLN("Loaded channel config: mode_private=%d", channel_config.mode_private);
-    } else {
-      MESH_DEBUG_PRINTLN("Invalid channel config, using defaults");
-      // Set defaults
-      channel_config.mode_private = false;  // Public mode by default
-      memset(channel_config.secret, 0, sizeof(channel_config.secret));
-      channel_config.guard = 0xDEADBEEF;
-      saveChannelConfig();  // Save defaults
+      loaded = true;
     }
+  }
+
+  if (!loaded && _store->restoreFromSD(CHANNEL_CONFIG_FILE)) {
+    File rf = _store->openRead( CHANNEL_CONFIG_FILE);
+    if (rf) {
+      size_t bytes_read = rf.read((uint8_t*)&loaded_config, sizeof(loaded_config));
+      rf.close();
+      if (bytes_read == sizeof(loaded_config) && loaded_config.guard == 0xDEADBEEF) {
+        loaded = true;
+      }
+    }
+  }
+
+  if (loaded) {
+    channel_config = loaded_config;
+    MESH_DEBUG_PRINTLN("Loaded channel config: mode_private=%d", channel_config.mode_private);
   } else {
-    MESH_DEBUG_PRINTLN("No channel config found, creating defaults");
-    // Set defaults
+    MESH_DEBUG_PRINTLN("Invalid or missing channel config, using defaults");
     channel_config.mode_private = false;  // Public mode by default
     memset(channel_config.secret, 0, sizeof(channel_config.secret));
     channel_config.guard = 0xDEADBEEF;
@@ -1000,10 +1059,11 @@ void MyMesh::loadChannelConfig() {
 }
 
 void MyMesh::saveChannelConfig() {
-  File f = openFileForWrite(_fs, CHANNEL_CONFIG_FILE);
+  File f = _store->openWrite( CHANNEL_CONFIG_FILE);
   if (f) {
     f.write((uint8_t*)&channel_config, sizeof(channel_config));
     f.close();
+    _store->backupToSD(CHANNEL_CONFIG_FILE);
     MESH_DEBUG_PRINTLN("Saved channel config");
   }
 }
@@ -1374,26 +1434,29 @@ void MyMesh::notifyClockSyncedFromRepeaters() {
 
 // ----------------------------------------------------------------------------
 
-void MyMesh::begin(FILESYSTEM *fs, SDStorage* sd) {
+void MyMesh::begin(DataStore* store) {
   mesh::Mesh::begin();
-  _fs = fs;
-  _sd = sd;
+  _store = store;
+
+  restoreConfigFromSDIfNeeded();
+
+  FILESYSTEM* fs = _store->getFS();
 
   // Load and increment boot counter
-  current_boot_sequence = loadBootCounter(_fs);
+  current_boot_sequence = loadBootCounter(fs);
   current_boot_sequence++;
-  saveBootCounter(_fs, current_boot_sequence);
+  saveBootCounter(fs, current_boot_sequence);
 
   // load persisted prefs
-  _cli.loadPrefs(_fs);
+  _cli.loadPrefs(fs);
 
-  acl.load(_fs);
+  acl.load(fs);
 
   // Load persisted posts
   loadPosts();
 
   // Load system message queue
-  system_msgs->load(_fs);
+  system_msgs->load(fs);
   MESH_DEBUG_PRINTLN("Loaded %d system messages from flash", system_msgs->getNumMessages());
 
   // Load network time sync configuration
@@ -1402,6 +1465,8 @@ void MyMesh::begin(FILESYSTEM *fs, SDStorage* sd) {
   // Load broadcast channel configuration
   loadChannelConfig();
   initialiseChannel();
+
+  backupConfigToSD();
 
   // Wait 5 seconds for Serial console to initialise before creating system messages
   MESH_DEBUG_PRINTLN("Waiting 5 seconds for Serial console initialisation...");
@@ -1478,11 +1543,7 @@ void MyMesh::updateFloodAdvertTimer() {
 }
 
 void MyMesh::dumpLogFile() {
-#if defined(RP2040_PLATFORM)
-  File f = _fs->open(PACKET_LOG_FILE, "r");
-#else
-  File f = _fs->open(PACKET_LOG_FILE);
-#endif
+  File f = _store->openRead(PACKET_LOG_FILE);
   if (f) {
     while (f.available()) {
       int c = f.read();
@@ -1499,16 +1560,7 @@ void MyMesh::setTxPower(uint8_t power_dbm) {
 
 void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
   self_id = new_id;
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  IdentityStore store(*_fs, "");
-#elif defined(ESP32)
-  IdentityStore store(*_fs, "/identity");
-#elif defined(RP2040_PLATFORM)
-  IdentityStore store(*_fs, "/identity");
-#else
-#error "need to define saveIdentity()"
-#endif
-  store.save("_main", self_id);
+  _store->saveMainIdentity(self_id);
 }
 
 void MyMesh::formatStatsReply(char *reply) {
@@ -1967,7 +2019,8 @@ void MyMesh::loop() {
 
   // is pending dirty contacts write needed?
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
-    acl.save(_fs, MyMesh::saveFilter);
+    acl.save(_store->getFS(), MyMesh::saveFilter);
+    _store->backupToSD("/s_contacts");
     dirty_contacts_expiry = 0;
   }
 
@@ -1978,7 +2031,7 @@ void MyMesh::loop() {
     system_msgs->cleanup(&acl);
     int new_count = system_msgs->getNumMessages();
     if (new_count < old_count) {
-      system_msgs->save(_fs);  // Save if messages were removed
+      system_msgs->save(_store->getFS());  // Save if messages were removed
       MESH_DEBUG_PRINTLN("System message cleanup: removed %d messages", old_count - new_count);
     }
     next_sys_msg_cleanup = futureMillis(60000);  // Cleanup every minute
@@ -2000,13 +2053,19 @@ void MyMesh::loop() {
 }
 
 void MyMesh::savePosts() {
-  if (!_fs) return;
+#if SD_SUPPORTED
+  if (!_store) return;
+  SDStorage* sd = _store->getSD();
+  if (!sd || !sd->isReady()) {
+    MESH_DEBUG_PRINTLN("SD card not available - posts not persisted");
+    return;
+  }
 
-  // Open file for writing
-  File f = openFileForWrite(_fs, POSTS_FILE);
+  // Open file for writing on SD card
+  File f = sd->openForWrite(POSTS_FILE);
 
   if (!f) {
-    MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file for writing");
+    MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file on SD for writing");
     return;
   }
 
@@ -2025,7 +2084,7 @@ void MyMesh::savePosts() {
   for (int i = 0; i < MAX_UNSYNCED_POSTS; i++) {
     PostInfo* p = &posts[i];
 
-    // Skip system messages (timestamp=0) - don't persist to flash
+    // Skip system messages (timestamp=0) - don't persist to SD
     if (p->post_timestamp == 0) {
       continue;
     }
@@ -2044,34 +2103,37 @@ void MyMesh::savePosts() {
     }
 
     if (!success) {
-      MESH_DEBUG_PRINTLN("ERROR: Failed to write post record");
+      MESH_DEBUG_PRINTLN("ERROR: Failed to write post record to SD");
       break;  // Stop writing on error
     }
   }
 
   f.close();
-  MESH_DEBUG_PRINTLN("Posts saved to flash");
+  MESH_DEBUG_PRINTLN("Posts saved to SD card");
+#else
+  // SD not supported on this platform - posts only exist in RAM
+  MESH_DEBUG_PRINTLN("SD not supported - posts not persisted");
+#endif
 }
 
 void MyMesh::loadPosts() {
-  if (!_fs) return;
-
-  if (!_fs->exists(POSTS_FILE)) {
-    MESH_DEBUG_PRINTLN("No posts file found - starting fresh");
+#if SD_SUPPORTED
+  if (!_store) return;
+  SDStorage* sd = _store->getSD();
+  if (!sd || !sd->isReady()) {
+    MESH_DEBUG_PRINTLN("SD card not available - no posts loaded");
     return;
   }
 
-  // Open file for reading (platform-specific pattern from companion_radio DataStore)
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  File f = _fs->open(POSTS_FILE, FILE_O_READ);
-#elif defined(RP2040_PLATFORM)
-  File f = _fs->open(POSTS_FILE, "r");
-#else
-  File f = _fs->open(POSTS_FILE, "r", false);
-#endif
+  if (!sd->exists(POSTS_FILE)) {
+    MESH_DEBUG_PRINTLN("No posts file on SD - starting fresh");
+    return;
+  }
+
+  File f = sd->openForRead(POSTS_FILE);
 
   if (!f) {
-    MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file for reading");
+    MESH_DEBUG_PRINTLN("ERROR: Failed to open posts file on SD for reading");
     return;
   }
 
@@ -2112,7 +2174,11 @@ void MyMesh::loadPosts() {
   }
 
   f.close();
-  MESH_DEBUG_PRINTLN("Posts loaded from flash");
+  MESH_DEBUG_PRINTLN("Posts loaded from SD card");
+#else
+  // SD not supported on this platform - no posts to load
+  MESH_DEBUG_PRINTLN("SD not supported - no posts loaded");
+#endif
 }
 
 int MyMesh::getRecentPosts(const PostInfo** dest, int max_posts) const {

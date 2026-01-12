@@ -1,6 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#include "DataStore.h"
 #include "SDStorage.h"
 #include "SerialConsoleHandler.h"
 
@@ -53,30 +54,41 @@ void setup() {
 
   fast_rng.begin(radio_get_rng_seed());
 
-  FILESYSTEM* fs;
+  // Initialize filesystem
 #if defined(NRF52_PLATFORM)
   InternalFS.begin();
-  fs = &InternalFS;
-  IdentityStore store(InternalFS, "");
+  static DataStore data_store(InternalFS);
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
-  fs = &LittleFS;
-  IdentityStore store(LittleFS, "/identity");
-  store.begin();
+  static DataStore data_store(LittleFS);
 #elif defined(ESP32)
   SPIFFS.begin(true);
-  fs = &SPIFFS;
-  IdentityStore store(SPIFFS, "/identity");
+  static DataStore data_store(SPIFFS);
 #else
   #error "need to define filesystem"
 #endif
-  if (!store.load("_main", the_mesh.self_id)) {
+
+  // Initialize SD card storage (optional, based on PIN_SDCARD_CS)
+  SDStorage* sd_storage = nullptr;
+#ifdef PIN_SDCARD_CS
+  static SDStorage sd;
+  if (sd.begin()) {
+    sd_storage = &sd;
+  } else {
+    Serial.println("SD card not available");
+  }
+#endif
+
+  data_store.begin(sd_storage);
+
+  // Load or create identity
+  if (!data_store.loadMainIdentity(the_mesh.self_id)) {
     the_mesh.self_id = radio_new_identity();   // create new random identity
     int count = 0;
     while (count < 10 && (the_mesh.self_id.pub_key[0] == 0x00 || the_mesh.self_id.pub_key[0] == 0xFF)) {  // reserved id hashes
       the_mesh.self_id = radio_new_identity(); count++;
     }
-    store.save("_main", the_mesh.self_id);
+    data_store.saveMainIdentity(the_mesh.self_id);
   }
 
   Serial.print("Room ID: ");
@@ -84,18 +96,7 @@ void setup() {
 
   sensors.begin();
 
-  // Initialize SD card storage (ESP32 with SD_CS_PIN only)
-  SDStorage* sd_storage = nullptr;
-#if defined(ESP32) && defined(SD_CS_PIN)
-  static SDStorage sd;
-  if (sd.begin()) {
-    sd_storage = &sd;
-  } else {
-    Serial.println("SD card not available - storage features disabled");
-  }
-#endif
-
-  the_mesh.begin(fs, sd_storage);
+  the_mesh.begin(&data_store);
 
   // Initialize serial console handler
   serial_console = new SerialConsoleHandler(&the_mesh);
