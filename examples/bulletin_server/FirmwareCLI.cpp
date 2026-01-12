@@ -58,8 +58,11 @@ bool FirmwareCLI::handleCommand(uint32_t sender_timestamp, char* command, char* 
   }
 
   // SD card commands
-  if (strcmp(command, "erase.sdcard") == 0) {
+  if (strcmp(command, "erase.sd") == 0) {
     return cmdEraseSDCard(reply);
+  }
+  if (strcmp(command, "get sd.status") == 0) {
+    return cmdGetSDStatus(reply);
   }
 
   return false; // Command not handled
@@ -296,6 +299,39 @@ bool FirmwareCLI::cmdEraseSDCard(char* reply) {
     }
   } else {
     strcpy(reply, "ERROR: SD card not available");
+  }
+  return true;
+}
+
+bool FirmwareCLI::cmdGetSDStatus(char* reply) {
+  SDStorage* sd = _mesh->getDataStore()->getSD();
+  if (!sd) {
+    strcpy(reply, "SD: Not supported (PIN_SDCARD_CS not defined)");
+    return true;
+  }
+
+  SDStatus status = sd->getStatus();
+  switch (status) {
+    case SD_NOT_SUPPORTED:
+      strcpy(reply, "SD: Not supported");
+      break;
+    case SD_NOT_PRESENT:
+      strcpy(reply, "SD: No card detected");
+      break;
+    case SD_UNFORMATTED:
+      strcpy(reply, "SD: Card unformatted or inaccessible");
+      break;
+    case SD_READY: {
+      uint32_t used = sd->getUsedSpace();
+      uint32_t total = sd->getTotalSpace();
+      uint32_t free = sd->getFreeSpace();
+      sprintf(reply, "SD: Ready - Used: %lu KB, Free: %lu KB, Total: %lu KB",
+              (unsigned long)used, (unsigned long)free, (unsigned long)total);
+      break;
+    }
+    default:
+      strcpy(reply, "SD: Unknown status");
+      break;
   }
   return true;
 }

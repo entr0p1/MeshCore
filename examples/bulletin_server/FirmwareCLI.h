@@ -20,6 +20,7 @@ class SDStorage;
  * - login.history - Display login history
  * - appreply <app_name> <pubkey_hex> <text> - Send app response
  * - erase.sdcard - Erase SD card data
+ * - get sd.status - Show SD card status and usage
  */
 class FirmwareCLI {
 public:
@@ -51,4 +52,5 @@ private:
   bool cmdLoginHistory(char* reply);
   bool cmdAppReply(const char* args, char* reply);
   bool cmdEraseSDCard(char* reply);
+  bool cmdGetSDStatus(char* reply);
 };

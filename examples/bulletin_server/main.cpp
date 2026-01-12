@@ -72,11 +72,8 @@ void setup() {
   SDStorage* sd_storage = nullptr;
 #ifdef PIN_SDCARD_CS
   static SDStorage sd;
-  if (sd.begin()) {
-    sd_storage = &sd;
-  } else {
-    Serial.println("SD card not available");
-  }
+  sd.begin();  // Try to initialize - status will be set regardless of success
+  sd_storage = &sd;  // Always pass pointer so status can be reported
 #endif
 
   data_store.begin(sd_storage);
