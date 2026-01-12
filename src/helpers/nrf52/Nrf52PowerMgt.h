@@ -8,8 +8,10 @@
 #include <helpers/PowerMgt.h>
 
 // Scan/debounce constants
-#define PWRMGT_STATE_SCAN_DEBOUNCE 3  // Consecutive readings to trigger state change
-#define PWRMGT_STATE_SCAN_INTVL 5     // Minutes between voltage scans
+// NOTE: These macros are intentionally simple so they can be tuned easily.
+#define PWRMGT_STATE_SCAN_DEBOUNCE 3           // Consecutive readings to trigger state change (Conserve and sleep modes)
+#define PWRMGT_STATE_SCAN_DEBOUNCE_SHUTDOWN 2  // Consecutive readings to trigger SYSTEMOFF (Shutdown mode only)
+#define PWRMGT_STATE_SCAN_INTVL 1              // Minutes between voltage scans
 
 // Shutdown reason codes (stored in GPREGRET before SYSTEMOFF)
 #define SHUTDOWN_REASON_NONE          0x00

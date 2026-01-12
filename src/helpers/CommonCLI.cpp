@@ -366,7 +366,15 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {
           sprintf(reply, "Power management not available");
         } else {
-          sprintf(reply, "> %s", _board->getResetReasonString());
+          uint8_t shutdown_reason = _board->getShutdownReason();
+          if (shutdown_reason != 0) {
+            sprintf(reply, "> %s; shutdown=%s (0x%02X)",
+              _board->getResetReasonString(),
+              _board->getShutdownReasonString(),
+              shutdown_reason);
+          } else {
+            sprintf(reply, "> %s", _board->getResetReasonString());
+          }
         }
       } else if (memcmp(config, "pwrmgt.bootmv", 13) == 0) {
         if (!_board->supportsPowerManagement() || !PowerMgt::isAvailable()) {

@@ -29,10 +29,15 @@ void XiaoNrf52Board::begin() {
   Serial.begin(115200);
   delay(1000);  // Wait for serial console to init
 
-  // Enhanced reset reason reporting - include shutdown reason for wake from SYSTEMOFF
-  if ((startup_reason & POWER_RESETREAS_OFF_Msk) && shutdown_reason != SHUTDOWN_REASON_NONE) {
-    MESH_DEBUG_PRINTLN("INIT: Reset = Wake from SYSTEMOFF (%s)",
-      Nrf52PowerMgt::getShutdownReasonString(shutdown_reason));
+  // Reset/shutdown reason reporting:
+  // - RESETREAS indicates *what kind* of reset occurred (including System OFF wake sources).
+  // - GPREGRET carries our software shutdown reason (why we entered SYSTEMOFF).
+  if (shutdown_reason != SHUTDOWN_REASON_NONE) {
+    MESH_DEBUG_PRINTLN("INIT: Reset = %s (RESETREAS=0x%lX); Shutdown = %s (0x%02X)",
+      Nrf52PowerMgt::getResetReasonString(startup_reason),
+      (unsigned long)startup_reason,
+      Nrf52PowerMgt::getShutdownReasonString(shutdown_reason),
+      shutdown_reason);
   } else {
     MESH_DEBUG_PRINTLN("INIT: Reset = %s (0x%lX)",
       Nrf52PowerMgt::getResetReasonString(startup_reason), (unsigned long)startup_reason);

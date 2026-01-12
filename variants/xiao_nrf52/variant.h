@@ -88,7 +88,14 @@ static const uint8_t D10 = 10;
 
 // LPCOMP wake configuration (voltage recovery from SYSTEMOFF)
 #define PWRMGT_LPCOMP_AIN           7     // AIN7 = P0.31 = PIN_VBAT
-#define PWRMGT_LPCOMP_REF_EIGHTHS   4     // 5/8 VDD (~1.125V @ 1.8V VDD) -> ~3375mV wake threshold
+// IMPORTANT: The XIAO exposes battery via a resistor divider (ADC_MULTIPLIER = 3.0). 
+// LPCOMP threshold at the pin is: Vpin = VDD * (REFSEL fraction) and battery voltage threshold is approx: VBAT ≈ Vpin * ADC_MULTIPLIER.
+//
+// Using 3/8 VDD keeps the wake threshold above the runtime shutdown point.
+// Example thresholds:
+// - If VDD ≈ 3.0V:  VBAT ≈ (3.0 * 3/8) * 3 ≈ 3375mV
+// - If VDD ≈ 3.3V:  VBAT ≈ (3.3 * 3/8) * 3 ≈ 3712mV
+#define PWRMGT_LPCOMP_REF_EIGHTHS   2     // 3/8 VDD
 
 static const uint8_t A0  = PIN_A0;
 static const uint8_t A1  = PIN_A1;

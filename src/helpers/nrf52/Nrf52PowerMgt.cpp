@@ -77,8 +77,18 @@ namespace Nrf52PowerMgt {
     if (reset_reason & POWER_RESETREAS_DOG_Msk) return "Watchdog";
     if (reset_reason & POWER_RESETREAS_SREQ_Msk) return "Soft Reset";
     if (reset_reason & POWER_RESETREAS_LOCKUP_Msk) return "CPU Lockup";
-    if (reset_reason & POWER_RESETREAS_OFF_Msk) return "Wake from SYSTEMOFF";
-    if (reset_reason & POWER_RESETREAS_DIF_Msk) return "Debug Interface";
+    #ifdef POWER_RESETREAS_LPCOMP_Msk
+      if (reset_reason & POWER_RESETREAS_LPCOMP_Msk) return "Wake from LPCOMP (SYSTEMOFF)";
+    #endif
+    #ifdef POWER_RESETREAS_VBUS_Msk
+      if (reset_reason & POWER_RESETREAS_VBUS_Msk) return "Wake from VBUS (SYSTEMOFF)";
+    #endif
+    #ifdef POWER_RESETREAS_OFF_Msk
+      if (reset_reason & POWER_RESETREAS_OFF_Msk) return "Wake from GPIO (SYSTEMOFF)";
+    #endif
+    #ifdef POWER_RESETREAS_DIF_Msk
+      if (reset_reason & POWER_RESETREAS_DIF_Msk) return "Debug Interface";
+    #endif
     return "Cold Boot";
   }
 
@@ -107,9 +117,35 @@ namespace Nrf52PowerMgt {
     delay(100);
 
     // Enter SYSTEMOFF
-    sd_power_system_off();
-    while(1);  // Should never reach here
-  }
+    // IMPORTANT: sd_power_system_off() only works when the SoftDevice is enabled.
+    // If called while SoftDevice is disabled, it returns NRF_ERROR_SOFTDEVICE_NOT_ENABLED
+    // and execution continues, which previously caused an infinite loop that *looked*
+    // like shutdown but never actually entered SYSTEMOFF. 
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+
+    if (sd_enabled) {
+      uint32_t err = sd_power_system_off();
+      // Should not return on success. If it *does* return, softdevice is probably enabled
+      if (err == NRF_ERROR_SOFTDEVICE_NOT_ENABLED) {
+        sd_enabled = 0;
+      }
+    } else {
+      // SoftDevice not available; write directly to POWER->SYSTEMOFF.
+      NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
+    }
+
+    // If SoftDevice claimed to be enabled but sd_power_system_off() returned
+    // NRF_ERROR_SOFTDEVICE_NOT_ENABLED, fall back to the register write.
+    if (!sd_enabled) {
+      NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
+    }
+
+    // If we get here, something went wrong. Stop the CPU in the lowest-power way we can.
+    while (1) {
+      __WFE();
+    }
+   }
 
   // Runtime voltage monitoring with debouncing and state transitions
   void monitorVoltage(PowerMgtState* state, uint16_t current_voltage_mv,
@@ -148,12 +184,17 @@ namespace Nrf52PowerMgt {
     }
 
     // Debouncing logic: require consecutive readings before transition
+    const uint8_t debounce_required =
+      (target_state == PowerMgt::STATE_SHUTDOWN)
+        ? PWRMGT_STATE_SCAN_DEBOUNCE_SHUTDOWN
+        : PWRMGT_STATE_SCAN_DEBOUNCE;
+
     if (target_state != state->state_current) {
       if (state->state_scan_target == target_state) {
         // Same target as last scan, increment counter
         state->state_scan_counter++;
 
-        if (state->state_scan_counter >= PWRMGT_STATE_SCAN_DEBOUNCE) {
+        if (state->state_scan_counter >= debounce_required) {
           // Debounce threshold reached, transition to new state
           MESH_DEBUG_PRINTLN("PWRMGT: Voltage %u mV -> transitioning %s -> %s",
             current_voltage_mv,
@@ -285,11 +326,12 @@ namespace Nrf52PowerMgt {
     NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Disabled;
 
     // Select analog input (AIN0-7 maps to PSEL 0-7)
-    NRF_LPCOMP->PSEL = (ain_channel & LPCOMP_PSEL_PSEL_Msk);
-
+    NRF_LPCOMP->PSEL = ((uint32_t)ain_channel << LPCOMP_PSEL_PSEL_Pos) & LPCOMP_PSEL_PSEL_Msk;
+ 
     // Reference: VDD fraction (0=1/8, 1=2/8, ..., 6=7/8)
-    // During SYSTEMOFF, VDD is ~1.8V (internal regulator from VDDH/battery)
-    NRF_LPCOMP->REFSEL = (vdd_fraction_eighths & LPCOMP_REFSEL_REFSEL_Msk);
+    // NOTE: The reference is derived from the SoC supply (VDD). On many boards VDD is regulated (~3.0-3.3V) even in SYSTEMOFF. Do not assume an internal 1.8V reference here.
+    NRF_LPCOMP->REFSEL = ((uint32_t)vdd_fraction_eighths << LPCOMP_REFSEL_REFSEL_Pos) & LPCOMP_REFSEL_REFSEL_Msk;
+
 
     // Detect UP events (voltage rises above threshold for battery recovery)
     NRF_LPCOMP->ANADETECT = LPCOMP_ANADETECT_ANADETECT_Up;
@@ -309,6 +351,11 @@ namespace Nrf52PowerMgt {
     // Enable LPCOMP
     NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Enabled;
     NRF_LPCOMP->TASKS_START = 1;
+
+    // Ensure the comparator has time to settle before we enter SYSTEMOFF.
+    for (uint8_t i = 0; i < 20 && !NRF_LPCOMP->EVENTS_READY; i++) {
+      delayMicroseconds(50);
+    }
 
     MESH_DEBUG_PRINTLN("PWRMGT: LPCOMP wake configured (AIN%d, ref=%d/8 VDD)",
                        ain_channel, vdd_fraction_eighths + 1);

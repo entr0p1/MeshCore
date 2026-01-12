@@ -84,7 +84,8 @@ public:
 
 #ifdef PIN_USER_BTN
     // Configure button press to wake up when in powered off state
-    nrf_gpio_cfg_sense_input(digitalPinToInterrupt(g_ADigitalPinMap[PIN_USER_BTN]), NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_LOW);
+    // Configure button press to wake up when in powered off state - nrf_gpio_cfg_sense_input expects an nRF GPIO pin number
+    nrf_gpio_cfg_sense_input(g_ADigitalPinMap[PIN_USER_BTN], NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_LOW);
 #endif
 
     // Use standard shutdown sequence
@@ -102,6 +103,12 @@ public:
 
   const char* getResetReasonString() override {
     return Nrf52PowerMgt::getResetReasonString(startup_reason);
+  }
+
+  uint8_t getShutdownReason() const override { return shutdown_reason; }
+
+  const char* getShutdownReasonString() override {
+    return Nrf52PowerMgt::getShutdownReasonString(shutdown_reason);
   }
 
   // Power management state access
