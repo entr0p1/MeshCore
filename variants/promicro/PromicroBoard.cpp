@@ -3,8 +3,8 @@
 
 #include "PromicroBoard.h"
 
-void PromicroBoard::begin() {    
-    NRF52Board::begin();
+void PromicroBoard::begin() {
+    NRF52BoardDCDC::begin();
     btn_prev_state = HIGH;
   
     pinMode(PIN_VBAT_READ, INPUT);
