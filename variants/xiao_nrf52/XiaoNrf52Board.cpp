@@ -5,88 +5,60 @@
 
 #include "XiaoNrf52Board.h"
 #include "target.h"
+
+#ifdef NRF52_POWER_MANAGEMENT
 #include <helpers/PowerMgt.h>
 
-XiaoNrf52Board* XiaoNrf52Board::s_activeInstance = nullptr;
+// Static configuration for power management
+// Values come from variant.h defines
+const PowerMgtConfig XiaoNrf52Board::power_config = {
+  .lpcomp_ain_channel = PWRMGT_LPCOMP_AIN,
+  .lpcomp_ref_eighths = PWRMGT_LPCOMP_REF_EIGHTHS,
+  .voltage_bootlock = PWRMGT_VOLTAGE_BOOTLOCK,
+  .voltage_conserve = PWRMGT_VOLTAGE_CONSERVE,
+  .voltage_sleep = PWRMGT_VOLTAGE_SLEEP,
+  .voltage_shutdown = PWRMGT_VOLTAGE_SHUTDOWN,
+  .readBatteryVoltage = &XiaoNrf52Board::readBatteryVoltageCallback,
+  .prepareShutdown = &XiaoNrf52Board::prepareShutdownCallback,
+};
 
-void XiaoNrf52Board::handleVoltageShutdown() {
-  if (s_activeInstance) {
-    s_activeInstance->prepareForBoardShutdown();
-  }
+// Static callback: read battery voltage via ADC
+uint16_t XiaoNrf52Board::readBatteryVoltageCallback() {
+  int adcvalue = analogRead(PIN_VBAT);
+  return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
 }
 
-void XiaoNrf52Board::begin() {
-  s_activeInstance = this;
+// Static callback: prepare board for SYSTEMOFF
+void XiaoNrf52Board::prepareShutdownCallback() {
+  // Keep VBAT divider enabled for LPCOMP monitoring during SYSTEMOFF
+  pinMode(VBAT_ENABLE, OUTPUT);
+  digitalWrite(VBAT_ENABLE, LOW);
+}
+#endif // NRF52_POWER_MANAGEMENT
 
+void XiaoNrf52Board::begin() {
   // Call base class begin() for DC/DC and common init
   NRF52BoardDCDC::begin();
 
-  // Use values captured in early_boot.cpp constructor before SystemInit()
-  startup_reason = g_reset_reason;
-  shutdown_reason = g_shutdown_reason;
-
-  // Debug: print the raw value and interpretation
   Serial.begin(115200);
   delay(1000);  // Wait for serial console to init
 
-  // Reset/shutdown reason reporting:
-  // - RESETREAS indicates *what kind* of reset occurred (including System OFF wake sources).
-  // - GPREGRET carries our software shutdown reason (why we entered SYSTEMOFF).
-  if (shutdown_reason != SHUTDOWN_REASON_NONE) {
-    MESH_DEBUG_PRINTLN("INIT: Reset = %s (RESETREAS=0x%lX); Shutdown = %s (0x%02X)",
-      Nrf52PowerMgt::getResetReasonString(startup_reason),
-      (unsigned long)startup_reason,
-      Nrf52PowerMgt::getShutdownReasonString(shutdown_reason),
-      shutdown_reason);
-  } else {
-    MESH_DEBUG_PRINTLN("INIT: Reset = %s (0x%lX)",
-      Nrf52PowerMgt::getResetReasonString(startup_reason), (unsigned long)startup_reason);
-  }
-
-  // Configure battery voltage ADC pin and settings (one-time initialization)
+  // Configure battery voltage ADC pin and settings
   pinMode(PIN_VBAT, INPUT);
-  // VBAT_ENABLE already configured in variant.cpp initVariant() (set LOW for safety)
   analogReadResolution(12);
   analogReference(AR_INTERNAL_3_0);
   delay(50);  // Allow ADC to settle before first read
 
-  // CRITICAL: Boot voltage protection check
-  // Runs early (after Serial init) to protect battery from over-discharge
-  // Skip check only if externally powered (USB/5V rail detected)
-  // NOTE: SoftDevice not available yet, must read USB register directly
-  bool usb_connected = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
-  boot_voltage_mv = getBattMilliVolts();
-  if (!usb_connected) {
-    MESH_DEBUG_PRINTLN("INIT: Power source = Battery");
-    // Only shutdown if reading is valid (>1000mV) AND below threshold
-    // This prevents spurious shutdowns on ADC glitches or uninitialized reads
-    if (boot_voltage_mv > 1000 && boot_voltage_mv < PWRMGT_VOLTAGE_BOOTLOCK) {
-      MESH_DEBUG_PRINTLN("INIT: CRITICAL: Battery voltage too low (%u mV < %u mV) - entering protective shutdown",
-        boot_voltage_mv, PWRMGT_VOLTAGE_BOOTLOCK);
-      delay(100);
-      prepareForBoardShutdown();
-      // Enter SYSTEMOFF (never returns)
-      Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_BOOT_PROTECT);
-    } else {
-      MESH_DEBUG_PRINTLN("INIT: Battery voltage reading = %u mV", boot_voltage_mv);
-    }
-  } else {
-    // USB/5V powered - still read voltage for informational purposes
-    MESH_DEBUG_PRINTLN("INIT: Power source = External");
-    MESH_DEBUG_PRINTLN("INIT: Voltage reading = %u mV", boot_voltage_mv);
-  }
+#ifdef NRF52_POWER_MANAGEMENT
+  // Initialize power management state from early-captured registers
+  Nrf52PowerMgt::initState(&power_state);
 
-  // Initialize power management state
-  memset(&power_state, 0, sizeof(power_state));
-  power_state.state_current = PowerMgt::STATE_NORMAL;
-  power_state.state_last = PowerMgt::STATE_NORMAL;
-  power_state.state_current_timestamp = millis();
-  power_state.state_last_timestamp = millis();
-  last_voltage_check_ms = millis();
-  led_power_state = 0xFF;  // Initialize to invalid state to force first LED update
+  // Boot voltage protection check (may not return if voltage too low)
+  Nrf52PowerMgt::checkBootVoltage(&power_state, &power_config);
 
   // Enable power management for this board
   PowerMgt::setAvailable(true);
+#endif
 
 #ifdef PIN_USER_BTN
   pinMode(PIN_USER_BTN, INPUT_PULLUP);
@@ -106,79 +78,11 @@ void XiaoNrf52Board::begin() {
   delay(10);  // Give sx1262 some time to power up
 }
 
-// Set RGB LEDs based on power state (for dev/testing without serial console)
-// LEDs are active LOW on XIAO nRF52 (LOW=ON, HIGH=OFF)
-// Visual scheme: Normal=off, Conserve=Yellow(R+G), Sleep=Blue, Shutdown=Red
-// FIXME: remove LED-based state indicators before production (dev aid only)
-void XiaoNrf52Board::setPowerStateLED(uint8_t state) {
-  switch(state) {
-    case PowerMgt::STATE_NORMAL:
-      // Normal: All LEDs off to save power
-      digitalWrite(LED_RED, HIGH);
-      digitalWrite(LED_GREEN, HIGH);
-      digitalWrite(LED_BLUE, HIGH);
-      break;
-
-    case PowerMgt::STATE_CONSERVE:
-      // Conserve: Yellow (Red + Green)
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, LOW);
-      digitalWrite(LED_BLUE, HIGH);
-      break;
-
-    case PowerMgt::STATE_SLEEP:
-      // Sleep: Blue
-      digitalWrite(LED_RED, HIGH);
-      digitalWrite(LED_GREEN, HIGH);
-      digitalWrite(LED_BLUE, LOW);
-      break;
-
-    case PowerMgt::STATE_SHUTDOWN:
-      // Shutdown: Red
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
-      digitalWrite(LED_BLUE, HIGH);
-      break;
-  }
-}
-
 void XiaoNrf52Board::loop() {
-  if (!PowerMgt::isAvailable()) {
-    return;
-  }
-  if (!PowerMgt::isRuntimeEnabled()) {
-    if (power_state.state_current != PowerMgt::STATE_NORMAL) {
-      Nrf52PowerMgt::transitionToState(&power_state, PowerMgt::STATE_NORMAL);
-    }
-    return;
-  }
-
-  // Update LED indicator if power state changed
-  // FIXME: remove LED-based state indicators before production (dev aid only)
-  if (power_state.state_current != led_power_state) {
-    setPowerStateLED(power_state.state_current);
-    led_power_state = power_state.state_current;
-  }
-
-  // Periodic voltage monitoring (every PWRMGT_STATE_SCAN_INTVL minutes)
-  unsigned long now = millis();
-  unsigned long interval_ms = PWRMGT_STATE_SCAN_INTVL * 60UL * 1000UL;
-
-  // Handle millis() rollover (occurs every ~49.7 days)
-  if (now < last_voltage_check_ms) {
-    last_voltage_check_ms = now;  // Reset on rollover
-  }
-
-  if (now - last_voltage_check_ms >= interval_ms) {
-    last_voltage_check_ms = now;
-
-    // Read current battery voltage
-    uint16_t current_voltage = getBattMilliVolts();
-
-    // Monitor voltage and handle state transitions
-    // Use static member for board-specific shutdown callback
-    Nrf52PowerMgt::monitorVoltage(&power_state, current_voltage, &XiaoNrf52Board::handleVoltageShutdown);
-  }
+#ifdef NRF52_POWER_MANAGEMENT
+  // Periodic voltage monitoring with state transitions
+  Nrf52PowerMgt::monitorVoltage(&power_state, &power_config);
+#endif
 }
 
 uint16_t XiaoNrf52Board::getBattMilliVolts() {
@@ -186,9 +90,39 @@ uint16_t XiaoNrf52Board::getBattMilliVolts() {
   return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
 }
 
-// Board-specific wrapper: passes variant globals to nRF52-generic deep sleep
-bool XiaoNrf52Board::isInDeepSleep() {
-  return Nrf52PowerMgt::deepSleep(&power_state, rtc_clock, radio_driver);
+void XiaoNrf52Board::powerOff() {
+  // Visual feedback: LED on while waiting for button release
+  digitalWrite(PIN_LED, LOW);
+#ifdef PIN_USER_BTN
+  while(digitalRead(PIN_USER_BTN) == LOW);
+#endif
+  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_BLUE, HIGH);
+  digitalWrite(PIN_LED, HIGH);
+
+#ifdef PIN_USER_BTN
+  // Configure button press to wake from SYSTEMOFF
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[PIN_USER_BTN], NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_LOW);
+#endif
+
+#ifdef NRF52_POWER_MANAGEMENT
+  // Use centralized shutdown with LPCOMP wake
+  prepareShutdownCallback();
+  Nrf52PowerMgt::configureLpcompWake(power_config.lpcomp_ain_channel, power_config.lpcomp_ref_eighths);
+  Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_USER);
+#else
+  // Fallback: direct SYSTEMOFF without LPCOMP wake
+  NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
+  while(1) { __WFE(); }
+#endif
 }
 
+bool XiaoNrf52Board::isInDeepSleep() {
+#ifdef NRF52_POWER_MANAGEMENT
+  return Nrf52PowerMgt::deepSleep(&power_state, rtc_clock, radio_driver);
+#else
+  return false;
 #endif
+}
+
+#endif // XIAO_NRF52

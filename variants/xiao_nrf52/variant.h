@@ -18,10 +18,6 @@ extern "C"
 {
 #endif // __cplusplus
 
-// Global variables for power management
-extern uint32_t g_reset_reason;
-extern uint8_t g_shutdown_reason;
-
 #define PINS_COUNT              (33)
 #define NUM_DIGITAL_PINS        (33)
 #define NUM_ANALOG_INPUTS       (8)

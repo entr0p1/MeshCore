@@ -1,15 +1,26 @@
+// nRF52 Power Management Implementation
+//
+// Centralized power management for nRF52-based boards.
+// See Nrf52PowerMgt.h for API documentation.
+
+#ifdef NRF52_POWER_MANAGEMENT
+
 #include "Nrf52PowerMgt.h"
 #include <nrf_soc.h>
 #include <nrf_rtc.h>
 
 namespace Nrf52PowerMgt {
 
-  // Use RTC2 as a low-power wake timer in Sleep mode
+  // ==========================================================================
+  // RTC2 Sleep Timer (internal)
+  // ==========================================================================
+
   static void initSleepTimer() {
     static bool initialized = false;
     if (initialized) return;
 
-    // 32.768 kHz / (PRESCALER+1); prescaler 32 -> ~1 kHz ticks
+    // RTC2 uses LFCLK (32.768 kHz from LFXO or LFRC)
+    // Accuracy varies by clock source but is sufficient for minute-scale wake intervals
     NRF_RTC2->PRESCALER = 32;
     NRF_RTC2->EVTENSET = RTC_EVTENSET_COMPARE0_Msk;
     NRF_RTC2->INTENSET = RTC_INTENSET_COMPARE0_Msk;
@@ -32,18 +43,97 @@ namespace Nrf52PowerMgt {
     NRF_RTC2->EVENTS_COMPARE[0] = 0;
   }
 
-  extern "C" void RTC2_IRQHandler(void) {
-    if (NRF_RTC2->EVENTS_COMPARE[0]) {
-      NRF_RTC2->EVENTS_COMPARE[0] = 0;
-      // No action needed; waking is enough
+  // ==========================================================================
+  // Initialization
+  // ==========================================================================
+
+  void initState(PowerMgtState* state) {
+    if (state == nullptr) return;
+
+    // Zero-initialize all fields
+    memset(state, 0, sizeof(PowerMgtState));
+
+    // Copy early-captured register values
+    state->reset_reason = g_nrf52_reset_reason;
+    state->shutdown_reason = g_nrf52_shutdown_reason;
+
+    // Initialize state to normal
+    state->state_current = PowerMgt::STATE_NORMAL;
+    state->state_last = PowerMgt::STATE_NORMAL;
+    state->state_current_timestamp = millis();
+    state->state_last_timestamp = millis();
+    state->last_voltage_check_ms = millis();
+
+    // Clear registers for next boot (must be done before SoftDevice takes over)
+    // Note: At this point SoftDevice may or may not be enabled
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+    if (sd_enabled) {
+      sd_power_reset_reason_clr(0xFFFFFFFF);
+      sd_power_gpregret_clr(0, 0xFF);
+    } else {
+      NRF_POWER->RESETREAS = 0xFFFFFFFF;  // Write 1s to clear
+      NRF_POWER->GPREGRET = 0;
+    }
+
+    // Log reset/shutdown info
+    if (state->shutdown_reason != SHUTDOWN_REASON_NONE) {
+      MESH_DEBUG_PRINTLN("PWRMGT: Reset = %s (0x%lX); Shutdown = %s (0x%02X)",
+        getResetReasonString(state->reset_reason),
+        (unsigned long)state->reset_reason,
+        getShutdownReasonString(state->shutdown_reason),
+        state->shutdown_reason);
+    } else {
+      MESH_DEBUG_PRINTLN("PWRMGT: Reset = %s (0x%lX)",
+        getResetReasonString(state->reset_reason),
+        (unsigned long)state->reset_reason);
     }
   }
 
-  // Transition to a new power management state
-  void transitionToState(PowerMgtState* state, uint8_t new_state) {
-    if (state == nullptr) {
-      return;
+  bool checkBootVoltage(PowerMgtState* state, const PowerMgtConfig* config) {
+    if (state == nullptr || config == nullptr) return true;
+    if (config->voltage_bootlock == 0) return true;  // Protection disabled
+    if (config->readBatteryVoltage == nullptr) return true;  // No voltage reader
+
+    // Skip check if externally powered
+    if (isExternalPowered()) {
+      MESH_DEBUG_PRINTLN("PWRMGT: Boot check skipped (external power)");
+      state->boot_voltage_mv = config->readBatteryVoltage();
+      return true;
     }
+
+    // Read boot voltage
+    state->boot_voltage_mv = config->readBatteryVoltage();
+    MESH_DEBUG_PRINTLN("PWRMGT: Boot voltage = %u mV (threshold = %u mV)",
+      state->boot_voltage_mv, config->voltage_bootlock);
+
+    // Only trigger shutdown if reading is valid (>1000mV) AND below threshold
+    // This prevents spurious shutdowns on ADC glitches or uninitialized reads
+    if (state->boot_voltage_mv > 1000 && state->boot_voltage_mv < config->voltage_bootlock) {
+      MESH_DEBUG_PRINTLN("PWRMGT: Boot voltage too low - entering protective shutdown");
+
+      // Board-specific shutdown preparation
+      if (config->prepareShutdown != nullptr) {
+        config->prepareShutdown();
+      }
+
+      // Configure LPCOMP for voltage recovery wake
+      configureLpcompWake(config->lpcomp_ain_channel, config->lpcomp_ref_eighths);
+
+      // Enter SYSTEMOFF (does not return)
+      enterSystemOff(SHUTDOWN_REASON_BOOT_PROTECT);
+      return false;  // Never reached
+    }
+
+    return true;
+  }
+
+  // ==========================================================================
+  // State Management
+  // ==========================================================================
+
+  void transitionToState(PowerMgtState* state, uint8_t new_state) {
+    if (state == nullptr) return;
 
     state->state_last = state->state_current;
     state->state_last_timestamp = state->state_current_timestamp;
@@ -54,42 +144,22 @@ namespace Nrf52PowerMgt {
     PowerMgt::setState(new_state);
   }
 
-  // Check if external power (USB or 5V rail) is present
+  // ==========================================================================
+  // Hardware Utilities
+  // ==========================================================================
+
   bool isExternalPowered() {
     // Check if SoftDevice is enabled before using its API
     uint8_t sd_enabled = 0;
     sd_softdevice_is_enabled(&sd_enabled);
 
     if (sd_enabled) {
-      // Use SoftDevice API when available
       uint32_t usb_status;
       sd_power_usbregstatus_get(&usb_status);
       return (usb_status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
     } else {
-      // SoftDevice not available, read register directly
       return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
     }
-  }
-
-  // Get human-readable reset reason string
-  const char* getResetReasonString(uint32_t reset_reason) {
-    if (reset_reason & POWER_RESETREAS_RESETPIN_Msk) return "Reset Pin";
-    if (reset_reason & POWER_RESETREAS_DOG_Msk) return "Watchdog";
-    if (reset_reason & POWER_RESETREAS_SREQ_Msk) return "Soft Reset";
-    if (reset_reason & POWER_RESETREAS_LOCKUP_Msk) return "CPU Lockup";
-    #ifdef POWER_RESETREAS_LPCOMP_Msk
-      if (reset_reason & POWER_RESETREAS_LPCOMP_Msk) return "Wake from LPCOMP (SYSTEMOFF)";
-    #endif
-    #ifdef POWER_RESETREAS_VBUS_Msk
-      if (reset_reason & POWER_RESETREAS_VBUS_Msk) return "Wake from VBUS (SYSTEMOFF)";
-    #endif
-    #ifdef POWER_RESETREAS_OFF_Msk
-      if (reset_reason & POWER_RESETREAS_OFF_Msk) return "Wake from GPIO (SYSTEMOFF)";
-    #endif
-    #ifdef POWER_RESETREAS_DIF_Msk
-      if (reset_reason & POWER_RESETREAS_DIF_Msk) return "Debug Interface";
-    #endif
-    return "Cold Boot";
   }
 
   // Internal helper: set shutdown reason in GPREGRET
@@ -104,7 +174,6 @@ namespace Nrf52PowerMgt {
     }
   }
 
-  // Clean up and enter SYSTEMOFF mode
   void enterSystemOff(uint8_t reason) {
     MESH_DEBUG_PRINTLN("PWRMGT: Entering SYSTEMOFF (%s)",
       getShutdownReasonString(reason));
@@ -119,40 +188,76 @@ namespace Nrf52PowerMgt {
     // Enter SYSTEMOFF
     // IMPORTANT: sd_power_system_off() only works when the SoftDevice is enabled.
     // If called while SoftDevice is disabled, it returns NRF_ERROR_SOFTDEVICE_NOT_ENABLED
-    // and execution continues, which previously caused an infinite loop that *looked*
-    // like shutdown but never actually entered SYSTEMOFF. 
+    // and execution continues, which previously caused an infinite loop.
     uint8_t sd_enabled = 0;
     sd_softdevice_is_enabled(&sd_enabled);
 
     if (sd_enabled) {
       uint32_t err = sd_power_system_off();
-      // Should not return on success. If it *does* return, softdevice is probably enabled
       if (err == NRF_ERROR_SOFTDEVICE_NOT_ENABLED) {
         sd_enabled = 0;
       }
-    } else {
-      // SoftDevice not available; write directly to POWER->SYSTEMOFF.
-      NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
     }
 
-    // If SoftDevice claimed to be enabled but sd_power_system_off() returned
-    // NRF_ERROR_SOFTDEVICE_NOT_ENABLED, fall back to the register write.
     if (!sd_enabled) {
+      // SoftDevice not available; write directly to POWER->SYSTEMOFF
       NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
     }
 
-    // If we get here, something went wrong. Stop the CPU in the lowest-power way we can.
+    // If we get here, something went wrong. Halt in lowest-power state.
     while (1) {
       __WFE();
     }
-   }
+  }
 
-  // Runtime voltage monitoring with debouncing and state transitions
-  void monitorVoltage(PowerMgtState* state, uint16_t current_voltage_mv,
-                      void (*onShutdown)()) {
-    if (state == nullptr) {
-      return;
+  void configureLpcompWake(uint8_t ain_channel, uint8_t vdd_fraction_eighths) {
+    // LPCOMP is not managed by SoftDevice - direct register access required
+
+    // Halt and disable before reconfiguration
+    NRF_LPCOMP->TASKS_STOP = 1;
+    NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Disabled;
+
+    // Select analog input (AIN0-7 maps to PSEL 0-7)
+    NRF_LPCOMP->PSEL = ((uint32_t)ain_channel << LPCOMP_PSEL_PSEL_Pos) & LPCOMP_PSEL_PSEL_Msk;
+
+    // Reference: VDD fraction (0=1/8, 1=2/8, ..., 6=7/8)
+    NRF_LPCOMP->REFSEL = ((uint32_t)vdd_fraction_eighths << LPCOMP_REFSEL_REFSEL_Pos) & LPCOMP_REFSEL_REFSEL_Msk;
+
+    // Detect UP events (voltage rises above threshold for battery recovery)
+    NRF_LPCOMP->ANADETECT = LPCOMP_ANADETECT_ANADETECT_Up;
+
+    // Enable 50mV hysteresis for noise immunity
+    NRF_LPCOMP->HYST = LPCOMP_HYST_HYST_Hyst50mV;
+
+    // Clear stale events/interrupts before enabling wake
+    NRF_LPCOMP->EVENTS_READY = 0;
+    NRF_LPCOMP->EVENTS_DOWN = 0;
+    NRF_LPCOMP->EVENTS_UP = 0;
+    NRF_LPCOMP->EVENTS_CROSS = 0;
+
+    NRF_LPCOMP->INTENCLR = 0xFFFFFFFF;
+    NRF_LPCOMP->INTENSET = LPCOMP_INTENSET_UP_Msk;
+
+    // Enable LPCOMP
+    NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Enabled;
+    NRF_LPCOMP->TASKS_START = 1;
+
+    // Wait for comparator to settle before entering SYSTEMOFF
+    for (uint8_t i = 0; i < 20 && !NRF_LPCOMP->EVENTS_READY; i++) {
+      delayMicroseconds(50);
     }
+
+    MESH_DEBUG_PRINTLN("PWRMGT: LPCOMP wake configured (AIN%d, ref=%d/8 VDD)",
+      ain_channel, vdd_fraction_eighths + 1);
+  }
+
+  // ==========================================================================
+  // Runtime Monitoring
+  // ==========================================================================
+
+  void monitorVoltage(PowerMgtState* state, const PowerMgtConfig* config) {
+    if (state == nullptr || config == nullptr) return;
+    if (config->readBatteryVoltage == nullptr) return;
 
     // Skip if runtime PM disabled or backend not available
     if (!PowerMgt::isAvailable() || !PowerMgt::isRuntimeEnabled()) {
@@ -162,24 +267,40 @@ namespace Nrf52PowerMgt {
       return;
     }
 
+    // Check timing - only scan at configured interval
+    unsigned long now = millis();
+    unsigned long interval_ms = PWRMGT_STATE_SCAN_INTVL * 60UL * 1000UL;
+
+    // Handle millis() rollover (occurs every ~49.7 days)
+    if (now < state->last_voltage_check_ms) {
+      state->last_voltage_check_ms = now;
+    }
+
+    if (now - state->last_voltage_check_ms < interval_ms) {
+      return;  // Not time for a scan yet
+    }
+    state->last_voltage_check_ms = now;
+
     // Skip state transitions if externally powered
     if (isExternalPowered()) {
-      // Reset to NORMAL when external power detected
       if (state->state_current != PowerMgt::STATE_NORMAL) {
-        MESH_DEBUG_PRINTLN("PWRMGT: External power detected, returning to Normal mode");
+        MESH_DEBUG_PRINTLN("PWRMGT: External power detected, returning to Normal");
         transitionToState(state, PowerMgt::STATE_NORMAL);
         state->state_scan_counter = 0;
       }
       return;
     }
 
-    // Determine target state based on current voltage
+    // Read current battery voltage
+    uint16_t current_voltage = config->readBatteryVoltage();
+
+    // Determine target state based on voltage thresholds
     uint8_t target_state = PowerMgt::STATE_NORMAL;
-    if (current_voltage_mv < PWRMGT_VOLTAGE_SHUTDOWN) {
+    if (config->voltage_shutdown > 0 && current_voltage < config->voltage_shutdown) {
       target_state = PowerMgt::STATE_SHUTDOWN;
-    } else if (current_voltage_mv < PWRMGT_VOLTAGE_SLEEP) {
+    } else if (config->voltage_sleep > 0 && current_voltage < config->voltage_sleep) {
       target_state = PowerMgt::STATE_SLEEP;
-    } else if (current_voltage_mv < PWRMGT_VOLTAGE_CONSERVE) {
+    } else if (config->voltage_conserve > 0 && current_voltage < config->voltage_conserve) {
       target_state = PowerMgt::STATE_CONSERVE;
     }
 
@@ -197,7 +318,7 @@ namespace Nrf52PowerMgt {
         if (state->state_scan_counter >= debounce_required) {
           // Debounce threshold reached, transition to new state
           MESH_DEBUG_PRINTLN("PWRMGT: Voltage %u mV -> transitioning %s -> %s",
-            current_voltage_mv,
+            current_voltage,
             PowerMgt::getStateString(state->state_current),
             PowerMgt::getStateString(target_state));
 
@@ -208,10 +329,13 @@ namespace Nrf52PowerMgt {
           if (target_state == PowerMgt::STATE_SHUTDOWN) {
             MESH_DEBUG_PRINTLN("PWRMGT: Critical battery level, entering shutdown");
 
-            // Board-specific cleanup (GPS, sensors, peripherals, etc.)
-            if (onShutdown != nullptr) {
-              onShutdown();
+            // Board-specific cleanup
+            if (config->prepareShutdown != nullptr) {
+              config->prepareShutdown();
             }
+
+            // Configure LPCOMP wake for recovery
+            configureLpcompWake(config->lpcomp_ain_channel, config->lpcomp_ref_eighths);
 
             enterSystemOff(SHUTDOWN_REASON_LOW_VOLTAGE);
           }
@@ -219,13 +343,11 @@ namespace Nrf52PowerMgt {
       } else {
         // Different target than last scan
         // Only reset counter if new target is BETTER (lower state number)
-        // If transitioning to a worse state (higher number), keep accumulating
         if (target_state < state->state_scan_target) {
-          // Battery improved, reset counter
           state->state_scan_target = target_state;
           state->state_scan_counter = 0;
         } else {
-          // Battery getting worse, update target but keep counter accumulating
+          // Battery getting worse, update target but keep accumulating
           state->state_scan_target = target_state;
           state->state_scan_counter++;
         }
@@ -237,11 +359,12 @@ namespace Nrf52PowerMgt {
     }
   }
 
-  // Deep sleep with RTC synchronization and radio management
+  // ==========================================================================
+  // Deep Sleep
+  // ==========================================================================
+
   bool deepSleep(PowerMgtState* state, mesh::RTCClock& rtc, mesh::Radio& radio) {
-    if (state == nullptr) {
-      return false;
-    }
+    if (state == nullptr) return false;
 
     if (!PowerMgt::isAvailable() || !PowerMgt::isRuntimeEnabled()) {
       return false;
@@ -282,8 +405,6 @@ namespace Nrf52PowerMgt {
       unsigned long elapsed_ms = millis() - state->last_sleep_millis;
       uint32_t elapsed_sec = elapsed_ms / 1000;
       if (elapsed_sec > 0) {
-        // Sync RTC: For hardware RTC this is harmless (sets to same time),
-        // for software RTC this correctly advances the time
         rtc.setCurrentTime(state->last_sleep_rtc + elapsed_sec);
       }
     }
@@ -292,13 +413,12 @@ namespace Nrf52PowerMgt {
     state->last_sleep_millis = millis();
     state->last_sleep_rtc = rtc.getCurrentTime();
 
-    // Enter deep sleep - CPU halts until next interrupt (timer, serial, SoftDevice)
+    // Enter deep sleep - CPU halts until next interrupt
     uint8_t sd_enabled = 0;
     sd_softdevice_is_enabled(&sd_enabled);
     if (sd_enabled) {
       sd_app_evt_wait();
     } else {
-      // SoftDevice not running; use WFE/SEV sequence
       __SEV();
       __WFE();
       __WFE();
@@ -307,7 +427,30 @@ namespace Nrf52PowerMgt {
     return true;  // Load shedding active, skip normal loop processing
   }
 
-  // Get human-readable shutdown reason string
+  // ==========================================================================
+  // String Utilities
+  // ==========================================================================
+
+  const char* getResetReasonString(uint32_t reset_reason) {
+    if (reset_reason & POWER_RESETREAS_RESETPIN_Msk) return "Reset Pin";
+    if (reset_reason & POWER_RESETREAS_DOG_Msk) return "Watchdog";
+    if (reset_reason & POWER_RESETREAS_SREQ_Msk) return "Soft Reset";
+    if (reset_reason & POWER_RESETREAS_LOCKUP_Msk) return "CPU Lockup";
+    #ifdef POWER_RESETREAS_LPCOMP_Msk
+      if (reset_reason & POWER_RESETREAS_LPCOMP_Msk) return "Wake from LPCOMP";
+    #endif
+    #ifdef POWER_RESETREAS_VBUS_Msk
+      if (reset_reason & POWER_RESETREAS_VBUS_Msk) return "Wake from VBUS";
+    #endif
+    #ifdef POWER_RESETREAS_OFF_Msk
+      if (reset_reason & POWER_RESETREAS_OFF_Msk) return "Wake from GPIO";
+    #endif
+    #ifdef POWER_RESETREAS_DIF_Msk
+      if (reset_reason & POWER_RESETREAS_DIF_Msk) return "Debug Interface";
+    #endif
+    return "Cold Boot";
+  }
+
   const char* getShutdownReasonString(uint8_t reason) {
     switch (reason) {
       case SHUTDOWN_REASON_LOW_VOLTAGE:  return "Low Voltage";
@@ -317,48 +460,14 @@ namespace Nrf52PowerMgt {
     }
   }
 
-  // Configure LPCOMP for voltage-based wake from SYSTEMOFF
-  void configureLpcompWake(uint8_t ain_channel, uint8_t vdd_fraction_eighths) {
-    // LPCOMP is not managed by SoftDevice - direct register access required
-
-    // Halt and disable before reconfiguration
-    NRF_LPCOMP->TASKS_STOP = 1;
-    NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Disabled;
-
-    // Select analog input (AIN0-7 maps to PSEL 0-7)
-    NRF_LPCOMP->PSEL = ((uint32_t)ain_channel << LPCOMP_PSEL_PSEL_Pos) & LPCOMP_PSEL_PSEL_Msk;
- 
-    // Reference: VDD fraction (0=1/8, 1=2/8, ..., 6=7/8)
-    // NOTE: The reference is derived from the SoC supply (VDD). On many boards VDD is regulated (~3.0-3.3V) even in SYSTEMOFF. Do not assume an internal 1.8V reference here.
-    NRF_LPCOMP->REFSEL = ((uint32_t)vdd_fraction_eighths << LPCOMP_REFSEL_REFSEL_Pos) & LPCOMP_REFSEL_REFSEL_Msk;
-
-
-    // Detect UP events (voltage rises above threshold for battery recovery)
-    NRF_LPCOMP->ANADETECT = LPCOMP_ANADETECT_ANADETECT_Up;
-
-    // Enable 50mV hysteresis for noise immunity (~150mV effective on battery due to divider)
-    NRF_LPCOMP->HYST = LPCOMP_HYST_HYST_Hyst50mV;
-
-    // Ensure stale events/interrupts are cleared before enabling wake
-    NRF_LPCOMP->EVENTS_READY = 0;
-    NRF_LPCOMP->EVENTS_DOWN = 0;
-    NRF_LPCOMP->EVENTS_UP = 0;
-    NRF_LPCOMP->EVENTS_CROSS = 0;
-
-    NRF_LPCOMP->INTENCLR = 0xFFFFFFFF;
-    NRF_LPCOMP->INTENSET = LPCOMP_INTENSET_UP_Msk;
-
-    // Enable LPCOMP
-    NRF_LPCOMP->ENABLE = LPCOMP_ENABLE_ENABLE_Enabled;
-    NRF_LPCOMP->TASKS_START = 1;
-
-    // Ensure the comparator has time to settle before we enter SYSTEMOFF.
-    for (uint8_t i = 0; i < 20 && !NRF_LPCOMP->EVENTS_READY; i++) {
-      delayMicroseconds(50);
-    }
-
-    MESH_DEBUG_PRINTLN("PWRMGT: LPCOMP wake configured (AIN%d, ref=%d/8 VDD)",
-                       ain_channel, vdd_fraction_eighths + 1);
-  }
-
 } // namespace Nrf52PowerMgt
+
+// RTC2 IRQ Handler (must be in global scope)
+extern "C" void RTC2_IRQHandler(void) {
+  if (NRF_RTC2->EVENTS_COMPARE[0]) {
+    NRF_RTC2->EVENTS_COMPARE[0] = 0;
+    // No action needed; waking is enough
+  }
+}
+
+#endif // NRF52_POWER_MANAGEMENT

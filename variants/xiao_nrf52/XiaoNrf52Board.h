@@ -9,60 +9,29 @@
 
 class XiaoNrf52Board : public NRF52BoardDCDC, public NRF52BoardOTA {
 protected:
-  static XiaoNrf52Board* s_activeInstance;
+#ifdef NRF52_POWER_MANAGEMENT
+  PowerMgtState power_state;
+  static const PowerMgtConfig power_config;
 
-  uint32_t startup_reason;              // RESETREAS register value
-  uint8_t shutdown_reason;              // GPREGRET value (why device entered last SYSTEMOFF)
-  uint16_t boot_voltage_mv;             // Battery voltage at boot (millivolts)
-  unsigned long last_voltage_check_ms;  // Timestamp of last voltage monitoring check
-  uint8_t led_power_state;              // Track LED state to avoid redundant updates
-
-  PowerMgtState power_state;    // Power management state
-
-  // Helper to set RGB LEDs based on power state (for dev/testing)
-  // Visual scheme: Normal=off, Conserve=Yellow(R+G), Sleep=Blue, Shutdown=Red
-  void setPowerStateLED(uint8_t state);
-
-  // Board-specific shutdown preparation (VBAT divider, LPCOMP wake, peripherals)
-  void prepareForBoardShutdown() {
-    // Keep VBAT divider enabled for LPCOMP monitoring during SYSTEMOFF
-    pinMode(VBAT_ENABLE, OUTPUT);
-    digitalWrite(VBAT_ENABLE, LOW);
-
-    // Configure LPCOMP for voltage recovery wake
-    Nrf52PowerMgt::configureLpcompWake(PWRMGT_LPCOMP_AIN, PWRMGT_LPCOMP_REF_EIGHTHS);
-
-    // FIXME: remove LED indicators before production to avoid wasting power
-    setPowerStateLED(PowerMgt::STATE_SHUTDOWN);
-  }
-
-  static void handleVoltageShutdown();
+  // Board-specific callbacks for power management
+  static uint16_t readBatteryVoltageCallback();
+  static void prepareShutdownCallback();
+#endif
 
 public:
   XiaoNrf52Board() : NRF52BoardOTA("XIAO_NRF52_OTA") {}
   void begin();
-  void loop();  // Periodic tasks (voltage monitoring, LED updates)
+  void loop();
 
-  // Returns true if board is in deep sleep cycle (RTC wake timer active)
-  // Call at start of main loop; if true, skip normal processing
+  // Returns true if board is in deep sleep cycle (skip normal processing)
   bool isInDeepSleep() override;
-
-  uint8_t getStartupReason() const override {
-    return BD_STARTUP_NORMAL;  // Legacy interface, real reason in startup_reason
-  }
-
-  uint32_t getResetReason() const { return startup_reason; }
-
-  uint16_t getBootVoltage() override {
-    return boot_voltage_mv;
-  }
 
 #if defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
+    digitalWrite(P_LORA_TX_LED, LOW);
   }
   void onAfterTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED off
+    digitalWrite(P_LORA_TX_LED, HIGH);
   }
 #endif
 
@@ -72,52 +41,30 @@ public:
     return "Seeed Xiao-nrf52";
   }
 
-  void powerOff() override {
-    // Set LED on and wait for button release before poweroff
-    digitalWrite(PIN_LED, LOW);
-#ifdef PIN_USER_BTN
-    while(digitalRead(PIN_USER_BTN) == LOW);
-#endif
-    digitalWrite(LED_GREEN, HIGH);
-    digitalWrite(LED_BLUE, HIGH);
-    digitalWrite(PIN_LED, HIGH);
+  void powerOff() override;
 
-#ifdef PIN_USER_BTN
-    // Configure button press to wake up when in powered off state
-    // Configure button press to wake up when in powered off state - nrf_gpio_cfg_sense_input expects an nRF GPIO pin number
-    nrf_gpio_cfg_sense_input(g_ADigitalPinMap[PIN_USER_BTN], NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_LOW);
-#endif
-
-    // Use standard shutdown sequence
-    prepareForBoardShutdown();
-    Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_USER);
-  }
-
-  bool supportsPowerManagement() override {
-    return true;
-  }
+  // Power management interface
+#ifdef NRF52_POWER_MANAGEMENT
+  bool supportsPowerManagement() override { return true; }
 
   bool isExternalPowered() override {
     return Nrf52PowerMgt::isExternalPowered();
   }
 
-  const char* getResetReasonString() override {
-    return Nrf52PowerMgt::getResetReasonString(startup_reason);
+  uint16_t getBootVoltage() override {
+    return power_state.boot_voltage_mv;
   }
 
-  uint8_t getShutdownReason() const override { return shutdown_reason; }
+  const char* getResetReasonString() override {
+    return Nrf52PowerMgt::getResetReasonString(power_state.reset_reason);
+  }
+
+  uint8_t getShutdownReason() const override {
+    return power_state.shutdown_reason;
+  }
 
   const char* getShutdownReasonString() override {
-    return Nrf52PowerMgt::getShutdownReasonString(shutdown_reason);
-  }
-
-  // Power management state access
-  uint8_t getPowerState() const {
-    return power_state.state_current;
-  }
-
-  const char* getPowerStateString() const {
-    return PowerMgt::getStateString(power_state.state_current);
+    return Nrf52PowerMgt::getShutdownReasonString(power_state.shutdown_reason);
   }
 
   void getPwrMgtCurrentStateInfo(char* buffer, size_t buflen) const override {
@@ -140,12 +87,16 @@ public:
 
     // Handle shutdown state - gracefully power off
     if (state == PowerMgt::STATE_SHUTDOWN) {
-      prepareForBoardShutdown();
+      prepareShutdownCallback();
+      Nrf52PowerMgt::configureLpcompWake(
+        power_config.lpcomp_ain_channel,
+        power_config.lpcomp_ref_eighths);
       Nrf52PowerMgt::enterSystemOff(SHUTDOWN_REASON_USER);
     }
 
     return true;
   }
+#endif // NRF52_POWER_MANAGEMENT
 };
 
-#endif
+#endif // XIAO_NRF52
