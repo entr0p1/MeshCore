@@ -43,8 +43,13 @@ protected:
   virtual void initiateShutdown(uint8_t reason);
 #endif
 
+#ifdef NRF52_WATCHDOG
+  void feedWatchdog();
+#endif
+
 public:
   virtual void begin();
+  virtual void tick();
   virtual uint8_t getStartupReason() const override { return startup_reason; }
   virtual float getMCUTemperature() override;
   virtual void reboot() override { NVIC_SystemReset(); }
@@ -56,6 +61,11 @@ public:
   uint8_t getShutdownReason() const override { return shutdown_reason; }
   const char* getResetReasonString(uint32_t reason) override;
   const char* getShutdownReasonString(uint8_t reason) override;
+#endif
+
+#ifdef NRF52_WATCHDOG
+  bool initWatchdog();
+  bool isWatchdogRunning() override;
 #endif
 };
 

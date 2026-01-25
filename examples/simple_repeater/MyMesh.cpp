@@ -808,6 +808,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+
+#ifdef NRF52_WATCHDOG
+  if (_prefs.wdt_enabled) {
+    board.initWatchdog();
+  }
+#endif
+
   acl.load(_fs);
   // TODO: key_store.begin();
   region_map.load(_fs);
