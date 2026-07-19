@@ -35,6 +35,7 @@ public:
   }
   uint8_t getSpreadingFactor() const override { return ((CustomSX1262 *)_radio)->spreadingFactor; }
   virtual void powerOff() override {
+    ((CustomSX1262 *)_radio)->standby();
     ((CustomSX1262 *)_radio)->sleep(false);
   }
 
